@@ -1,0 +1,86 @@
+# ===========================================
+# 白名单策略：先忽略所有，再逐项放行
+# ===========================================
+
+# 忽略所有文件
+*
+
+# ---------- 放行目录结构 ----------
+# 必须先放行目录，再放行其中的文件
+
+# C++ 源码
+!src/
+!src/**/
+!include/
+!include/**/
+!apps/
+!apps/**/
+
+# Python 脚本
+!scripts/
+!scripts/**/
+!plot_navresult.py
+
+# ---------- 放行文件类型 ----------
+
+# C++ 源文件和头文件
+!*.cpp
+!*.h
+!*.hpp
+!*.cc
+!*.cxx
+
+# Python 文件
+!*.py
+
+# 构建配置
+!CMakeLists.txt
+!*.cmake
+
+# 项目配置（YAML）
+!config.yaml
+!config_*.yaml
+!test_config.yaml
+
+# 文档
+!README.md
+!docs/
+!docs/**/
+!docs/**/*.md
+
+# .gitignore 自身
+!.gitignore
+
+# ---------- 始终忽略 ----------
+# 即使在放行目录中也要排除
+
+# 编译产物
+build/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / 编辑器
+.vscode/
+.claude/
+.research/
+.idea/
+
+# 虚拟环境
+.venv/
+
+# 操作系统
+Thumbs.db
+.DS_Store
+
+# 第三方库（太大，建议用 CMake FetchContent 管理）
+ThirdParty/

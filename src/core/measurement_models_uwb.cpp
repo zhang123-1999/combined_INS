@@ -1,0 +1,404 @@
+#include "core/uwb.h"
+#include "utils/math_utils.h"
+#include <iostream>
+
+using namespace std;
+using namespace Eigen;
+
+namespace MeasModels {
+
+/**
+ * 计算 UWB 多基站量测模型。
+ * 标准ESKF约定：y = z - h，H = ∂h/∂x
+ */
+UwbModel ComputeUwbModel(const State &state, const VectorXd &z,
+                         const MatrixXd &anchors,
+                         double sigma_uwb) {
+  int num_anchors = anchors.rows();
+  if (z.size() != num_anchors) {
+  }
+
+  UwbModel model;
+  model.H.setZero(num_anchors, kStateDim);
+  VectorXd h(num_anchors);
+
+  for (int i = 0; i < num_anchors; ++i) {
+    Vector3d r = state.p - anchors.row(i).transpose();
+    double dist = r.norm();
+    h[i] = dist;
+    if (dist > 1e-9) {
+      model.H.block<1, 3>(i, 0) = r.transpose() / dist;
+    }
+  }
+
+  // 标准残差 y = z - h
+  model.y = z - h;
+  model.R = MatrixXd::Identity(num_anchors, num_anchors) * (sigma_uwb * sigma_uwb);
+  return model;
+}
+
+/**
+ * 零速更新（ZUPT）量测模型。
+ * 标准ESKF约定：y = z - h = 0 - v^n = -v^n
+ */
+VelConstraintModel ComputeZuptModel(const State &state, double sigma_zupt) {
+  VelConstraintModel model;
+
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Vector3d v_ned = R_ne.transpose() * state.v;
+
+  // y = z - h = 0 - v_ned = -v_ned
+  model.y = -v_ned;
+
+  model.H.setZero(3, kStateDim);
+  model.H.block<3, 3>(0, 3) = Matrix3d::Identity();
+
+  model.R = Matrix3d::Identity() * (sigma_zupt * sigma_zupt);
+  return model;
+}
+
+/**
+ * 非完整约束（NHC）量测模型。
+ * 标准ESKF约定：y = z - h = 0 - v_v = -v_v
+ * H 使用标准雅可比 ∂h/∂x
+ */
+VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
+                                   const Vector3d &omega_ib_b_raw,
+                                   double sigma_nhc_y, double sigma_nhc_z,
+                                   const FejManager *fej) {
+  VelConstraintModel model;
+
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+
+  Vector3d v_ned = R_ne.transpose() * state.v;
+  Vector3d v_b = C_bn.transpose() * v_ned;
+  Vector3d omega_ie_n = OmegaIeNed(llh.lat);
+  Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
+  Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
+  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
+  Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
+
+  const Vector3d &lever_arm = state.lever_arm;
+  Vector3d v_wheel_b = v_b + omega_nb_b.cross(lever_arm);
+  Vector3d v_v = C_b_v * v_wheel_b;
+
+  // y = z - h = 0 - (v_v.y, v_v.z)
+  model.y.resize(2);
+  model.y << -v_v.y(), -v_v.z();
+
+  model.H.setZero(2, kStateDim);
+
+  // H_v = C_b^v * C_n^b
+  Matrix3d H_v = C_b_v * C_bn.transpose();
+
+  // H_theta = -C_b^v * Skew(v_b) * C_n^b
+  // 正确推导：δ(C_n^b * v^n) / δφ = -C_n^b * Skew(v^n) = -Skew(v^b) * C_n^b
+  // 故 H_theta_full = C_b^v * (-Skew(v^b)) * C_n^b = -C_b^v * Skew(v^b) * C_bn.transpose()
+  Matrix3d H_theta = -C_b_v * Skew(v_b) * C_bn.transpose();
+
+  // H_bg = C_b^v * Skew(l) * diag(1-sg)
+  Matrix3d H_bg = C_b_v * Skew(lever_arm) * sf_g.asDiagonal();
+  // H_sg = C_b^v * Skew(l) * diag(ω_ib^b-bg)
+  Matrix3d H_sg = C_b_v * Skew(lever_arm) * omega_ib_unbiased.asDiagonal();
+
+  model.H.block<2, 3>(0, 3) = H_v.block<2, 3>(1, 0);
+  model.H.block<2, 3>(0, 6) = H_theta.block<2, 3>(1, 0);
+  model.H.block<2, 3>(0, 12) = H_bg.block<2, 3>(1, 0);
+  model.H.block<2, 3>(0, 15) = H_sg.block<2, 3>(1, 0);
+
+  // H_alpha: 安装角微小旋转对 v_v 的影响
+  // 安装角 pitch 对应绕 vehicle-Y 轴旋转，mounting_yaw 对应绕 vehicle-Z 轴旋转
+  // ∂v_v / ∂mounting_pitch = e_Y × v_v,  e_Y = [0,1,0] 在 vehicle 系
+  // ∂v_v / ∂mounting_yaw  = e_Z × v_v,  e_Z = [0,0,1] 在 vehicle 系
+  Vector3d e_pitch_v(0.0, 1.0, 0.0);  // vehicle 系 Y 轴
+  Vector3d e_yaw_v(0.0, 0.0, 1.0);   // vehicle 系 Z 轴
+  Vector3d dv_dpitch = e_pitch_v.cross(v_v);  // ∂v_v/∂mounting_pitch
+  Vector3d dv_dyaw = e_yaw_v.cross(v_v);      // ∂v_v/∂mounting_yaw
+  // NHC 取 y 分量（行0）和 z 分量（行1）
+  model.H(0, 23) = dv_dpitch(1);
+  model.H(0, 24) = dv_dyaw(1);
+  model.H(1, 23) = dv_dpitch(2);
+  model.H(1, 24) = dv_dyaw(2);
+
+  // H_lever = C_b^v * Skew(ω_nb^b)
+  Matrix3d H_lever = C_b_v * Skew(omega_nb_b);
+  model.H.block<2, 3>(0, 25) = H_lever.block<2, 3>(1, 0);
+
+  // 补充：杆臂通过 omega_nb_b 对姿态误差的间接耦合
+  // δ(C_n^b * omega_in^n) / δφ ≈ C_n^b * Skew(omega_in^n) 的贡献经杆臂传播
+  // H_theta_lever = -C_b^v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n)
+  // 注：仅当 lever_arm.norm() > 0.05m 时该项才有显著影响
+  if (lever_arm.norm() > 1e-3) {
+    Matrix3d H_theta_lever =
+        -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
+    model.H.block<2, 3>(0, 6) += H_theta_lever.block<2, 3>(1, 0);
+  }
+
+  if (fej != nullptr && fej->enabled && fej->initialized) {
+    Matrix3d C_bn_fej = fej->CbnRefAt(state);
+    Vector3d v_b_fej = C_bn_fej.transpose() * v_ned;
+
+    Matrix3d H_v_fej = C_b_v * C_bn_fej.transpose();
+    Matrix3d H_theta_fej = -C_b_v * Skew(v_b_fej) * C_bn_fej.transpose();
+
+    model.H.block<2, 3>(0, 3) = H_v_fej.block<2, 3>(1, 0);
+    model.H.block<2, 3>(0, 6) = H_theta_fej.block<2, 3>(1, 0);
+
+    if (fej->use_layer2) {
+      Vector3d sf_g_fej = Vector3d::Ones() - fej->s_g_fej;
+      Vector3d omega_ib_unbiased_fej = omega_ib_b_raw - fej->b_g_fej;
+      Matrix3d H_bg_fej =
+          C_b_v * Skew(fej->l_odo_fej) * sf_g_fej.asDiagonal();
+      Matrix3d H_sg_fej =
+          C_b_v * Skew(fej->l_odo_fej) * omega_ib_unbiased_fej.asDiagonal();
+      model.H.block<2, 3>(0, 12) = H_bg_fej.block<2, 3>(1, 0);
+      model.H.block<2, 3>(0, 15) = H_sg_fej.block<2, 3>(1, 0);
+    }
+  }
+
+  model.R = Matrix2d::Zero();
+  model.R(0, 0) = sigma_nhc_y * sigma_nhc_y;
+  model.R(1, 1) = sigma_nhc_z * sigma_nhc_z;
+  return model;
+}
+
+/**
+ * 里程计（ODO）前向速度约束。
+ * 标准ESKF约定：y = z - h = odo_speed - pred_reading
+ */
+VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
+                                   const Matrix3d &C_b_v,
+                                   const Vector3d &omega_ib_b_raw,
+                                   double sigma_odo,
+                                   const FejManager *fej) {
+  VelConstraintModel model;
+
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+
+  Vector3d v_ned = R_ne.transpose() * state.v;
+  Vector3d v_b = C_bn.transpose() * v_ned;
+  Vector3d omega_ie_n = OmegaIeNed(llh.lat);
+  Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
+  Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
+  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
+  Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
+
+  const Vector3d &lever_arm = state.lever_arm;
+  Vector3d v_wheel_b = v_b + omega_nb_b.cross(lever_arm);
+  Vector3d v_phys_v = C_b_v * v_wheel_b;
+
+  double pred_reading = state.odo_scale * v_phys_v.x();
+
+  // y = z - h = odo_speed - pred_reading
+  model.y.resize(1);
+  model.y(0) = odo_speed - pred_reading;
+
+  model.H.setZero(1, kStateDim);
+
+  double s = state.odo_scale;
+
+  // 1. H_v
+  RowVector3d H_v_phys = (C_b_v * C_bn.transpose()).row(0);
+  model.H.block<1, 3>(0, 3) = s * H_v_phys;
+
+  // 2. H_theta = -C_b^v * Skew(v_b) * C_n^b（取第0行对应前向速度分量）
+  // 推导与 NHC 一致：δ(C_n^b v^n)/δφ = -Skew(v^b) * C_n^b
+  Matrix3d H_theta_full = -C_b_v * Skew(v_b) * C_bn.transpose();
+  model.H.block<1, 3>(0, 6) = s * H_theta_full.row(0);
+
+  // 3. H_bg = C_b^v * Skew(l) * diag(1-sg)
+  RowVector3d H_bg_phys =
+      C_b_v.row(0) * Skew(lever_arm) * sf_g.asDiagonal();
+  model.H.block<1, 3>(0, 12) = s * H_bg_phys;
+
+  // 3b. H_sg = C_b^v * Skew(l) * diag(ω_ib^b-bg)
+  RowVector3d H_sg_phys =
+      C_b_v.row(0) * Skew(lever_arm) * omega_ib_unbiased.asDiagonal();
+  model.H.block<1, 3>(0, 15) = s * H_sg_phys;
+
+  // 4. H_scale = v_phys_x（标准雅可比）
+  model.H(0, 21) = v_phys_v.x();
+
+  // 5. H_alpha: 安装角微小旋转对 v_phys_v 前向分量的影响
+  // ∂v_phys_v.x() / ∂mounting_pitch = (e_Y × v_phys_v).x()
+  // ∂v_phys_v.x() / ∂mounting_yaw   = (e_Z × v_phys_v).x()
+  Vector3d e_pitch_v(0.0, 1.0, 0.0);
+  Vector3d e_yaw_v(0.0, 0.0, 1.0);
+  Vector3d dv_dpitch = e_pitch_v.cross(v_phys_v);
+  Vector3d dv_dyaw = e_yaw_v.cross(v_phys_v);
+  model.H(0, 23) = s * dv_dpitch(0);
+  model.H(0, 24) = s * dv_dyaw(0);
+
+  // 6. H_lever = C_b^v * Skew(ω_nb^b)
+  RowVector3d H_lever_phys = C_b_v.row(0) * Skew(omega_nb_b);
+  model.H.block<1, 3>(0, 25) = s * H_lever_phys;
+
+  if (fej != nullptr && fej->enabled && fej->initialized) {
+    Matrix3d C_bn_fej = fej->CbnRefAt(state);
+    Vector3d v_b_fej = C_bn_fej.transpose() * v_ned;
+
+    RowVector3d H_v_phys_fej = (C_b_v * C_bn_fej.transpose()).row(0);
+    Matrix3d H_theta_full_fej = -C_b_v * Skew(v_b_fej) * C_bn_fej.transpose();
+
+    model.H.block<1, 3>(0, 3) = s * H_v_phys_fej;
+    model.H.block<1, 3>(0, 6) = s * H_theta_full_fej.row(0);
+
+    if (fej->use_layer2) {
+      Vector3d sf_g_fej = Vector3d::Ones() - fej->s_g_fej;
+      Vector3d omega_ib_unbiased_fej = omega_ib_b_raw - fej->b_g_fej;
+      RowVector3d H_bg_phys_fej =
+          C_b_v.row(0) * Skew(fej->l_odo_fej) * sf_g_fej.asDiagonal();
+      RowVector3d H_sg_phys_fej =
+          C_b_v.row(0) * Skew(fej->l_odo_fej) *
+          omega_ib_unbiased_fej.asDiagonal();
+      model.H.block<1, 3>(0, 12) = s * H_bg_phys_fej;
+      model.H.block<1, 3>(0, 15) = s * H_sg_phys_fej;
+    }
+  }
+
+  model.R.resize(1, 1);
+  model.R(0, 0) = sigma_odo * sigma_odo;
+
+  return model;
+}
+
+/**
+ * GNSS位置量测模型（NED系下）。
+ * 标准ESKF约定：y = z - h，H = ∂h/∂x
+ */
+UwbModel ComputeGnssPositionModel(const State &state, const Vector3d &z_ecef,
+                                  const Vector3d &sigma_gnss,
+                                  const FejManager *fej) {
+  UwbModel model;
+
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+
+  Vector3d lever_ned = C_bn * state.gnss_lever_arm;
+  Vector3d p_pred_ecef = state.p + R_ne * lever_ned;
+
+  Vector3d dr_ecef = p_pred_ecef - z_ecef;
+  Vector3d dr_ned = R_ne.transpose() * dr_ecef;
+
+  // y = z - h = -(h - z) = -dr_ned
+  model.y = -dr_ned;
+
+  model.H.setZero(3, kStateDim);
+  model.H.block<3, 3>(0, 0) = Matrix3d::Identity();
+  model.H.block<3, 3>(0, 6) = Skew(lever_ned);
+  // H_gnss_lever = C_b^n（标准雅可比，正号）
+  model.H.block<3, 3>(0, 28) = C_bn;
+
+  if (fej != nullptr && fej->enabled && fej->initialized) {
+    Matrix3d C_bn_fej = fej->CbnRefAt(state);
+    Vector3d lever_ned_fej = C_bn_fej * fej->l_gnss_fej;
+    model.H.block<3, 3>(0, 6) = Skew(lever_ned_fej);
+    model.H.block<3, 3>(0, 28) = C_bn_fej;
+  }
+
+  model.R = (sigma_gnss.cwiseProduct(sigma_gnss)).asDiagonal();
+
+  return model;
+}
+
+/**
+ * GNSS速度量测模型（NED系下）。
+ * 标准ESKF约定：y = z - h，H = ∂h/∂x
+ */
+UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel_ecef,
+                                  const Vector3d &omega_ib_b_raw,
+                                  const Vector3d &sigma_gnss_vel,
+                                  const FejManager *fej) {
+  UwbModel model;
+
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+
+  Vector3d v_ned = R_ne.transpose() * state.v;
+
+  Vector3d omega_ie_n = OmegaIeNed(llh.lat);
+  Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
+  Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
+  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
+  Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
+
+  Vector3d lever_ned = C_bn * state.gnss_lever_arm;
+
+  Vector3d lever_vel_b = Skew(omega_nb_b) * state.gnss_lever_arm;
+  Vector3d lever_vel_n = C_bn * lever_vel_b;
+
+  Vector3d v_pred_ned = v_ned + lever_vel_n;
+  Vector3d z_gnss_vel_ned = R_ne.transpose() * z_gnss_vel_ecef;
+
+  // y = z - h = obs - pred
+  model.y = z_gnss_vel_ned - v_pred_ned;
+
+  model.H.setZero(3, kStateDim);
+
+  // H_v = I_3
+  model.H.block<3, 3>(0, 3) = Matrix3d::Identity();
+
+  // H_φ（Group A，不变）
+  Matrix3d H_phi_1 = -Skew(omega_in_n) * Skew(lever_ned);
+  Vector3d Cb_l_cross_omega = C_bn * Skew(state.gnss_lever_arm) * omega_ib_corr;
+  Matrix3d H_phi_2 = -Skew(Cb_l_cross_omega);
+  model.H.block<3, 3>(0, 6) = H_phi_1 + H_phi_2;
+
+  // H_bg = C_b^n * Skew(l_gnss) * diag(1-sg)
+  model.H.block<3, 3>(0, 12) =
+      C_bn * Skew(state.gnss_lever_arm) * sf_g.asDiagonal();
+
+  // H_sg = C_b^n * Skew(l_gnss) * diag(ω_ib^b-bg)
+  model.H.block<3, 3>(0, 15) =
+      C_bn * Skew(state.gnss_lever_arm) * omega_ib_unbiased.asDiagonal();
+
+  // H_gnss_lever = C_b^n * Skew(ω_nb^b)（标准雅可比，使用ω_nb^b）
+  model.H.block<3, 3>(0, 28) = C_bn * Skew(omega_nb_b);
+
+  if (fej != nullptr && fej->enabled && fej->initialized) {
+    Matrix3d C_bn_fej = fej->CbnRefAt(state);
+    Vector3d lever_ned_fej = C_bn_fej * fej->l_gnss_fej;
+    Vector3d omega_ib_unbiased_fej = omega_ib_unbiased;
+    Vector3d sf_g_fej = sf_g;
+    if (fej->use_layer2) {
+      omega_ib_unbiased_fej = omega_ib_b_raw - fej->b_g_fej;
+      sf_g_fej = Vector3d::Ones() - fej->s_g_fej;
+    }
+    Vector3d omega_ib_corr_fej = sf_g_fej.cwiseProduct(omega_ib_unbiased_fej);
+    Vector3d omega_nb_b_fej = omega_ib_corr_fej - C_bn_fej.transpose() * omega_in_n;
+
+    Matrix3d H_phi_1_fej = -Skew(omega_in_n) * Skew(lever_ned_fej);
+    Vector3d Cb_l_cross_omega_fej =
+        C_bn_fej * Skew(fej->l_gnss_fej) * omega_ib_corr_fej;
+    Matrix3d H_phi_2_fej = -Skew(Cb_l_cross_omega_fej);
+    model.H.block<3, 3>(0, 6) = H_phi_1_fej + H_phi_2_fej;
+
+    model.H.block<3, 3>(0, 28) = C_bn_fej * Skew(omega_nb_b_fej);
+
+    if (fej->use_layer2) {
+      model.H.block<3, 3>(0, 12) =
+          C_bn_fej * Skew(fej->l_gnss_fej) * sf_g_fej.asDiagonal();
+      model.H.block<3, 3>(0, 15) =
+          C_bn_fej * Skew(fej->l_gnss_fej) * omega_ib_unbiased_fej.asDiagonal();
+    }
+  }
+
+  model.R = sigma_gnss_vel.cwiseProduct(sigma_gnss_vel).asDiagonal();
+
+  return model;
+}
+
+}  // namespace MeasModels

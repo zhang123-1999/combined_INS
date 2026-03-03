@@ -1,0 +1,104 @@
+# 测试配置文件: data4数据集，无GNSS
+# 用于调试
+
+common:
+  anchors:
+    mode: fixed
+    margin: 1.0
+    positions: []
+
+  gating:
+    uwb_residual_max: 100000000000.0
+    time_tolerance: 1.0e-6
+    max_dt: 0.2
+
+fusion:
+  imu_path: "dataset/data4_converted/IMU_converted_ANS-200R.txt"
+  odo_path: "dataset/data4_converted/ODO_converted.txt"
+  pos_path: "dataset/data4_converted/POS_converted.txt"
+  gnss_path: ""          # 不使用GNSS
+  uwb_path: ""
+  output_path: "SOL_test.txt"
+
+  starttime: 275309.0
+  finaltime: 277340.0
+
+  uwb_anchor_schedule:
+    enabled: false
+
+  noise:
+    sigma_acc: 0.05
+    sigma_gyro: 0.005
+    sigma_ba: 0.0005
+    sigma_bg: 0.000233
+    sigma_sg: 0.0005
+    sigma_sa: 0.0005
+    sigma_odo_scale: 0.00001
+    sigma_mounting: 0.0001
+    sigma_lever_arm: 0.001
+    sigma_gnss_lever_arm: 0.001
+    sigma_gnss_pos: 1.0
+    sigma_uwb: 100.0
+    markov_corr_time: 3600
+
+  constraints:
+    enable_nhc: true
+    enable_odo: true
+    enable_zupt: false
+
+    sigma_odo: 0.1
+    odo_lever_arm: [0.0, 0.0, 0.0]
+    imu_mounting_angle: [0.0, 0.0, 1.38]
+
+    sigma_nhc_y: 0.1
+    sigma_nhc_z: 0.1
+
+    sigma_zupt: 0.05
+    zupt_min_duration: 0.5
+    zupt_max_speed: 0.2
+    zupt_max_gyro: 0.05
+    zupt_max_acc: 0.5
+
+    enable_diagnostics: false
+    nhc_max_abs_v: 5.0
+
+  init:
+    use_truth_pva: true
+
+    init_pos_lla: [30.4009516321, 114.2764603394, 24.2372]
+    init_vel_ned: [-6.8214, -0.0249, -0.0549]
+    init_att_rpy: [-0.7841, -0.02843, 181.43026]
+
+    ba0: [0.0, 0.0, 0.0]
+    bg0: [0.0, 0.0, 0.0]
+
+    sg0: [0.0, 0.0, 0.0]
+    sa0: [0.0, 0.0, 0.0]
+
+    odo_scale: 1.0
+    mounting_pitch0: 0.0
+    mounting_yaw0: 1.38
+    lever_arm0: [0.0, 0.0, 0.0]
+    gnss_lever_arm0: [0.0, 0.0, 0.0]
+
+    std_pos: [0.1, 0.1, 0.1]
+    std_vel: [0.1, 0.1, 0.1]
+    std_att: [0.1, 0.1, 0.1]
+    std_ba: [0.0005, 0.0005, 0.0005]
+    std_bg: [2.33e-4, 2.33e-4, 2.33e-4]
+    std_sg: [0.0005, 0.0005, 0.0005]
+    std_sa: [0.0005, 0.0005, 0.0005]
+    std_odo_scale: 0.005
+    std_mounting_pitch: 0.5
+    std_mounting_yaw: 0.3
+    std_lever_arm: [0.1, 0.1, 0.1]
+    std_gnss_lever_arm: [0.1, 0.1, 0.1]
+
+    P0_diag: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.0001, 0.0001, 0.0001, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-5, 1.0e-4, 0.09, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 1.0e-6]
+
+generator:
+  pos_path: "dataset/data4_converted/POS_converted.txt"
+  output_path: "UWB_simulated.txt"
+  uwb_hz: 10.0
+  sigma: 0.1
+  seed: 42

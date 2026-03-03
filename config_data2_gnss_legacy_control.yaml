@@ -1,0 +1,146 @@
+﻿# 配置文件: data2 数据集基线
+# INS + GNSS + ODO + NHC 组合导航 (31维状态, P/V/A 用真值初始化)
+
+common:
+  anchors:
+    mode: fixed            # fixed | auto
+    margin: 1.0           # mode=auto 生效
+    positions: []         # data2不需要UWB基站
+
+  gating:
+    uwb_residual_max: 100000000000.0  # UWB量测门限 (m)
+    time_tolerance: 1.0e-6
+    max_dt: 0.2
+
+fusion:
+  # data2数据文件路径
+  imu_path: "dataset/data2_converted/IMU_converted.txt"
+  odo_path: "dataset/data2_converted/ODO_converted.txt"
+  pos_path: "dataset/data2_converted/POS_converted.txt"
+  gnss_path: "dataset/data2_converted/GNSS_converted.txt"
+  uwb_path: ""          # data2不使用UWB
+  output_path: "SOL_data2_gnss_legacy_control.txt"
+
+  # 时间裁剪范围 (data2重叠时间段)
+  starttime: 528076.0
+  finaltime: 530488.9
+
+  uwb_anchor_schedule:
+    enabled: false
+
+  fej:
+    enable: false
+    enable_layer2: true
+    imu_window_size: 100
+    omega_threshold: 0.05
+    accel_threshold: 0.5
+
+  noise:
+    # IMU噪声参数
+    sigma_acc: 0.05              # 速度随机游走 VRW (m/s/√Hz)
+    sigma_gyro: 0.005            # 角度随机游走 ARW (rad/√Hz)
+
+    # 传感器零偏不稳定性
+    sigma_ba: 0.0005             # 加计零偏不稳定性: 50 mGal
+    sigma_bg: 0.000233           # 陀螺零偏不稳定性: 48 deg/h
+
+    # 比例因子
+    sigma_sg: 0.0005             # 陀螺比例因子不稳定性: 500 ppm
+    sigma_sa: 0.0005             # 加计比例因子不稳定性: 500 ppm
+
+    # ODO参数
+    sigma_odo_scale: 0.00001     # ODO比例因子过程噪声
+    sigma_mounting: 0.0001       # 安装角过程噪声
+    sigma_mounting_pitch: 0.0001 # 安装俯仰角过程噪声（可选，<0回退sigma_mounting）
+    sigma_mounting_yaw: 0.0001   # 安装偏航角过程噪声（可选，<0回退sigma_mounting）
+    sigma_lever_arm: 0.001        # 杆臂过程噪声
+
+    # GNSS参数 (新增)
+    sigma_gnss_lever_arm: 0.001   # GNSS杆臂过程噪声
+    sigma_gnss_pos: 1           # GNSS位置量测标准差 (m)
+
+    # UWB参数 (data2不使用UWB)
+    sigma_uwb: 100.0
+
+    # 一阶高斯马尔可夫相关时间
+    markov_corr_time: 3600
+
+  constraints:
+    enable_nhc: true
+    enable_odo: true
+    enable_zupt: false
+
+    sigma_odo: 0.1
+    odo_lever_arm: [0.0, 0.0, 0.0]
+    imu_mounting_angle: [0.0, 0.0, 1.38]
+
+    sigma_nhc_y: 0.1
+    
+    sigma_nhc_z: 0.1
+
+    sigma_zupt: 0.05
+    zupt_min_duration: 0.5
+    zupt_max_speed: 0.2
+    zupt_max_gyro: 0.05
+    zupt_max_acc: 0.5
+
+    enable_diagnostics: false
+    nhc_max_abs_v: 5.0
+
+    enable_consistency_log: false
+    # 运动状态分级自适应滤波（替代原单一全状态更新节奏）
+    enable_covariance_floor: false
+    p_floor_pos_var: 0.01
+    p_floor_vel_var: 0.001
+    p_floor_att_deg: 0.01
+    p_floor_mounting_deg: 0.1
+    p_floor_bg_var: 1.0e-8
+
+  init:
+    use_truth_pva: true
+
+    # 初始状态 (data2首帧真值, 实际由 use_truth_pva=true 覆盖)
+    init_pos_lla: [30.3957018325, 114.2754286202, 28.9047]
+    init_vel_ned: [-0.2748, -11.4603, -0.1198]
+    init_att_rpy: [-0.10782, 0.62269, 268.28679]
+
+    # 初始零偏
+    ba0: [0.0, 0.0, 0.0]
+    bg0: [0.0, 0.0, 0.0]
+
+    # 比例因子初值
+    sg0: [0.0, 0.0, 0.0]
+    sa0: [0.0, 0.0, 0.0]
+
+    odo_scale: 0.0
+    mounting_pitch0: 0.0
+    mounting_yaw0: 0.0
+    lever_arm0: [0.0, 0.0, 0.0]
+    gnss_lever_arm0: [0.0, 0.0, 0.0]   # GNSS天线杆臂初值(未知，赋0)
+
+    # 初始误差标准差
+    # 注：std_att/std_mounting_* 单位为 degree；其余为 SI 单位
+    std_pos: [0.1, 0.1, 0.1]          # m  (位置来自真值，精度较高)
+    std_vel: [0.1, 0.1, 0.1]          # m/s (速度来自真值)
+    std_att: [0.1, 0.1, 0.1]          # deg (姿态来自真值，~0.1°)
+    std_ba: [0.0005, 0.0005, 0.0005]  # m/s² (零偏不确定性)
+    std_bg: [2.33e-4, 2.33e-4, 2.33e-4]  # rad/s
+    std_sg: [0.0005, 0.0005, 0.0005]  # 无量纲 (500 ppm)
+    std_sa: [0.0005, 0.0005, 0.0005]  # 无量纲
+    std_odo_scale: 0.005
+    std_mounting_pitch: 0.5            # deg (安装角未精确测量，用0.5°)
+    std_mounting_yaw: 0.3              # deg
+    std_lever_arm: [0.1, 0.1, 0.1]    # m
+    std_gnss_lever_arm: [0.1, 0.1, 0.1]  # m (GNSS杆臂未知，需较大初始方差)
+
+    # 31维P0对角线 [pos(3), vel(3), att(3), ba(3), bg(3), sg(3), sa(3), odo_scale(1), mp(1), my(1), lever(3), gnss_lever(3), reserve(1)]
+    P0_diag: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.0001, 0.0001, 0.0001, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-7, 2.5e-5, 1.0e-4, 0.09, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 1.0e-6]
+
+generator:
+  pos_path: "dataset/data2_converted/POS_converted.txt"
+  output_path: "UWB_simulated.txt"
+  uwb_hz: 10.0
+  sigma: 0.1
+  seed: 42
+
+

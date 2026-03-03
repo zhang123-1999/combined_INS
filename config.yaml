@@ -1,0 +1,131 @@
+﻿# 统一配置文件：无需命令行参数，修改此文件即可
+#cmake --build build --config Release
+#      - [-2199700, 5175900, 2992520]
+#      - [-2189350, 5175900, 2992520]
+#      - [-2199700, 5184640, 2992520]
+common:
+  anchors:
+    mode: fixed            # fixed | auto
+    margin: 1.0           # mode=auto 生效
+    positions:
+      - [-2199700, 5175900, 2992420]
+      - [-2189350, 5175900, 2992520]
+      - [-2199700, 5184640, 2992620]
+
+
+
+
+  gating:
+    uwb_residual_max: 100000000000.0  # UWB 量测门限 (m)
+    time_tolerance: 1.0e-6
+    # max_dt: 0.2
+
+fusion:
+  imu_path: "IMU_converted.txt"    # IMU 增量数据
+  uwb_path: "UWB_simulated.txt"    # UWB 距离数据
+  pos_path: "POS_converted.txt"    # 真值轨迹
+  odo_path: "iODO.txt"             # ODO forward speed
+  output_path: "SOL.txt"           # 解算输出
+  starttime: 527000                # 起始时间（绝对时间戳），默认不过滤
+  finaltime: 530626                # 结束时间（绝对时间戳），默认不过滤
+  uwb_anchor_schedule:
+    enabled: true
+    head_ratio: 0.05
+    head_anchors: []
+    tail_anchors: []
+
+  fej:
+    enable: false
+    enable_layer2: true
+    imu_window_size: 100
+    omega_threshold: 0.05
+    accel_threshold: 0.5
+
+  noise:
+    sigma_uwb: 0.1
+    sigma_acc: 0.05              # 速度随机游走 VRW (m/s/√Hz)
+    sigma_gyro: 0.005            # 角度随机游走 ARW (rad/√Hz)
+    # 以下为不稳定性参数（马尔可夫模式下的稳态标准差）
+    sigma_ba: 0.0005             # 加计零偏不稳定性: 50 mGal = 0.0005 m/s²
+    sigma_bg: 0.000233           # 陀螺零偏不稳定性: 48 deg/h ≈ 2.33e-4 rad/s
+    sigma_sg: 0.0005             # 陀螺比例因子不稳定性: 500 ppm
+    sigma_sa: 0.0005             # 加计比例因子不稳定性: 500 ppm
+    sigma_odo_scale: 0.00001    # ODO比例因子过程噪声
+    sigma_mounting: 0.0001       # 添加微小过程噪声，避免早期过度调整
+    sigma_mounting_roll: 0.0001  # 安装横滚角过程噪声（可选，<0回退sigma_mounting）
+    sigma_mounting_pitch: 0.0001 # 安装俯仰角过程噪声（可选，<0回退sigma_mounting）
+    sigma_mounting_yaw: 0.0001   # 安装偏航角过程噪声（可选，<0回退sigma_mounting）
+    sigma_lever_arm: 0.001       # 杆臂过程噪声 (m/√Hz)
+    # 一阶高斯马尔可夫相关时间 (秒)，>0 启用，≤0 用随机游走
+    markov_corr_time: 3600       # 1h (陀螺和加表相关时间)
+
+  constraints:
+    enable_nhc: true
+    enable_odo: true
+    sigma_odo: 0.01
+    odo_lever_arm: [0.605, -1.025, 0.705]
+    imu_mounting_angle: [0.0, -0.532, 1.38]  # [0]=固定横滚角，Pitch/Yaw由状态估计
+    enable_zupt: false
+    sigma_nhc_y: 0.1
+    sigma_nhc_z: 0.1
+    sigma_zupt: 0.05
+    zupt_min_duration: 0.5
+    zupt_max_speed: 0.2
+    zupt_max_gyro: 0.05
+    zupt_max_acc: 0.5
+    enable_diagnostics: false
+    nhc_max_abs_v: 5.0
+    # 运动状态分级自适应滤波
+    enable_covariance_floor: true
+    p_floor_pos_var: 0.01
+    p_floor_vel_var: 0.001
+    p_floor_att_deg: 0.01
+    p_floor_mounting_deg: 0.1
+    p_floor_bg_var: 1.0e-8
+
+  init:
+    use_truth_pva: true    # 设为 false 以使用下面的手动初始值
+    
+    # 初始状态 (参考 初始姿态和参数.md)
+    init_pos_lla: [28.1421701503, 112.9585396051, 38.591] # Lat(deg), Lon(deg), H(m)
+    init_vel_ned: [-0.273, -3.942, -0.020]                # North, East, Down (m/s)
+    init_att_rpy: [1.40822092, -0.95903515, 267.77618701] # Roll, Pitch, Yaw (deg)
+    
+    # 初始零偏
+    ba0: [-0.015, -0.006, 0.0]        # Acc Bias (m/s^2). Orig: -1500, -600, 0 mGal
+    bg0: [0.000485, -0.001454, -0.000485] # Gyro Bias (rad/s). Orig: 100, -300, -100 deg/h
+    odo_scale: 1.08              # 恢复已验证的初值
+    # IMU 比例因子初值 (无量纲, ppm/1e6)
+    sg0: [0.001, 0.006, -0.004]        # 陀螺比例因子: [1000, 6000, -4000] ppm
+    sa0: [0.0026, 0.0084, 0.0003]      # 加计比例因子: [2600, 8400, 300] ppm
+
+    # 初始误差标准差 (用于构建 P0)
+    std_pos: [0.05, 0.05, 0.1]        # m
+    std_vel: [0.05, 0.05, 0.05]       # m/s
+    std_att: [0.1, 0.1, 0.5]          # deg
+    std_ba: [0.0005, 0.0005, 0.0005]  # m/s^2. ~50 mGal
+    std_bg: [2.33e-4, 2.33e-4, 2.33e-4] # rad/s. ~48 deg/h
+    std_odo_scale: 0.005         # 初始不确定性
+    std_sg: [0.0005, 0.0005, 0.0005]   # 陀螺比例因子 STD: 500 ppm
+    std_sa: [0.0005, 0.0005, 0.0005]   # 加计比例因子 STD: 500 ppm
+
+    # 安装角初始值和标准差
+    mounting_pitch0: -0.532    # 初始安装俯仰角 (deg)
+    mounting_yaw0: 1.38        # 初始安装航向角 (deg)
+    std_mounting_pitch: 0.01   # 固定（纯INS+ODO下与attitude pitch不可分离）
+    std_mounting_yaw: 0.3        # 收紧安装航向角初始不确定性 (deg)
+
+    # 杆臂初值和标准差
+    lever_arm0: [0.605, -1.025, 0.705]   # 杆臂初值 (m, FRD)，同 odo_lever_arm
+    std_lever_arm: [0.1, 0.1, 0.1]       # 杆臂初始不确定度 (m)
+
+generator:
+  pos_path: "POS_converted.txt"    # 真值路径
+  output_path: "UWB_simulated.txt" # 生成的 UWB 距离文件
+  uwb_hz: 10.0                     # UWB 采样频率 (Hz)
+  sigma: 0.1                       # 距离噪声标准差 (m)
+  seed: 42                         # 噪声随机种子
+  # 可选覆写 anchors（若不写则继承 common.anchors）
+  # anchors:
+  #   mode: auto
+  #   margin: 2.0
