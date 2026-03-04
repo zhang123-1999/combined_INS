@@ -270,6 +270,41 @@ next_step:
 - next_step:
   - 以 nofreeze 为基准，继续测试 `odo_scale/mounting/lever` 多状态 post-GNSS 冻结组合。
 
+### session_id: 20260304-1526-push-updates-to-github
+
+- timestamp: 2026-03-04 15:26 (local)
+- objective: 将本地更新提交并上传到 GitHub 远端仓库。
+- scope:
+  - 汇总当前工作区改动并创建提交
+  - 推送到 `origin/main`
+  - 记录提交号与远端同步结果
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - N/A（本次为版本管理操作）
+- commands:
+  - `git add -A`
+  - `git commit -m "Add GNSS30 ESKF/InEKF experiments and update configs/docs"`
+  - `git push origin main`
+- artifacts:
+  - 远端分支更新: `origin/main`
+  - 提交: `e52160735c3c54881f65b1c7e95a776e3711de3c`
+- metrics:
+  - N/A（本次无新增算法数值指标）
+- artifact_mtime:
+  - commit time: 2026-03-04 15:25:59 +0800
+- config_hash_or_mtime:
+  - N/A
+- dataset_time_window:
+  - N/A
+- result_freshness_check: pass（远端已接收：`b94bd0b..e521607 main -> main`）
+- observability_notes:
+  - 无（本次未新增可观性实验，仅做代码同步）
+- decision:
+  - 当前实验与脚本更新已作为一个提交同步到 GitHub，后续实验在该提交基础上继续。
+- next_step:
+  - 按既定优先队列继续执行 `ISSUE-001` 与 post-GNSS 冻结矩阵实验。
+
 ## 下一步（优先队列）
 
 1. 使用已修复的 `scripts/analysis/compare_fej_vs_standard.py` 重跑 `ISSUE-001` 的 baseline compare 并重生摘要文件。
@@ -280,3 +315,4 @@ next_step:
    - consistency 指标
    - 调度窗口影响
 5. 继续保持任务级摘要写法；达到阈值后执行历史压缩。
+6. 后续每个完整实验批次结束后，执行一次远端同步以避免本地/远端漂移。
