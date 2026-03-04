@@ -216,8 +216,9 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   F.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = -Skew(2.0 * omega_ie_n + omega_en_n);
 
   if (use_inekf) {
-    // RI-EKF: F_vφ = -(a_m^n ×)
-    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = -Skew(a_m_ned);
+    // RI-EKF: F_vφ = (g^n ×)，仅与重力相关，与当前姿态估计无关。
+    Vector3d g_ned(0.0, 0.0, LocalGravityLocal(lat, h));
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = Skew(g_ned);
   } else {
     // 标准 ESKF: F_vφ = (a_m^n ×)
     F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = Skew(a_m_ned);

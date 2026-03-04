@@ -27,6 +27,9 @@ void EskfEngine::Initialize(const State &state,
   // 设定初值并标记引擎已就绪
   state_ = state;
   P_ = P0;
+  if (fej_ != nullptr && fej_->enabled) {
+    fej_->p_init_ecef = state.p;
+  }
   ApplyStateMaskToCov();
   initialized_ = true;
 }
@@ -220,6 +223,15 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   // 将NED误差转换为ECEF误差
   Llh llh = EcefToLlh(state_.p);
   Matrix3d R_ne = RotNedToEcef(llh);
+  bool use_inekf = (fej_ != nullptr && fej_->enabled);
+  if (use_inekf) {
+    // RI 误差坐标 -> 加法误差坐标：
+    // δv = ξ_v - (v^n ×)ξ_φ, δp = ξ_p - (p^n_local ×)ξ_φ
+    Vector3d v_ned_nom = R_ne.transpose() * state_.v;
+    Vector3d p_ned_local = R_ne.transpose() * (state_.p - fej_->p_init_ecef);
+    dv_ned -= Skew(v_ned_nom) * dphi_ned;
+    dr_ned -= Skew(p_ned_local) * dphi_ned;
+  }
 
   // δr^e = R_n^e * δr^n
   Vector3d dr_ecef = R_ne * dr_ned;
@@ -236,7 +248,6 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   // q_new = q ⊗ Exp(-dphi_ecef)
   // 误差状态 φ 在 NED 系定义，先转到 ECEF 后注入。
   Vector3d dphi_ecef = R_ne * dphi_ned;
-  bool use_inekf = (fej_ != nullptr && fej_->enabled);
   if (use_inekf) {
     Vector4d dq = QuatFromSmallAngle(dphi_ecef);
     state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));

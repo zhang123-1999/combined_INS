@@ -38,10 +38,12 @@ struct State {
 
 /**
  * InEKF 模式开关。
- * 说明：保留 FejManager 类型名仅用于兼容旧调用点，字段不再承载 FEJ 冻结语义。
+ * 说明：保留 FejManager 类型名仅用于兼容旧调用点；
+ * 仅承载 InEKF 开关与 RI 参考原点（非 FEJ 冻结语义）。
  */
 struct InEkfConfig {
   bool enabled = false;
+  Vector3d p_init_ecef = Vector3d::Zero();  // RI 参考原点（Initialize 时设置）
 
   void Enable(bool flag) { enabled = flag; }
   bool IsEnabled() const { return enabled; }
@@ -256,7 +258,7 @@ class EskfEngine {
    * 获取当前 IMU 时间戳。
    */
   double timestamp() const { return curr_imu_.t; }
-  void SetFejManager(const FejManager *fej) { fej_ = fej; }
+  void SetFejManager(FejManager *fej) { fej_ = fej; }
   void SetStateMask(const StateMask &mask);
   void SetCorrectionGuard(const CorrectionGuard &guard) { correction_guard_ = guard; }
   void SetNoiseParams(const NoiseParams &noise) { noise_ = noise; }
@@ -299,7 +301,7 @@ class EskfEngine {
   ImuData curr_imu_{};
   ImuCacheState imu_state_{ImuCacheState::Empty};
   bool initialized_{false};
-  const FejManager *fej_{nullptr};
+  FejManager *fej_{nullptr};
   StateMask state_mask_{};
   CorrectionGuard correction_guard_{};
   CovarianceFloor covariance_floor_{};

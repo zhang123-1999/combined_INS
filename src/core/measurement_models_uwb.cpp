@@ -13,10 +13,9 @@ namespace MeasModels {
 //   InEKF: q_new = Exp(dphi_ecef) ⊗ q
 //   ESKF : q_new = q ⊗ Exp(-dphi_ecef)
 //
-// 因此在相同观测函数 h(X) 下，InEKF 与标准 ESKF 的姿态列雅可比通常整体符号相反。
-// 当前实现保持一致：
-//   GNSS_POS:  ESKF +Skew(lever_ned) / InEKF -Skew(lever_ned)
-//   ODO/NHC:   ESKF -(...)            / InEKF +(…)
+// 但 InEKF 并非“仅姿态列翻符号”：
+// - ODO/NHC 速度约束在 RI 坐标下姿态列解耦（置零）
+// - GNSS 位置/速度模型需补充 RI 坐标变换带来的耦合项
 
 /**
  * 计算 UWB 多基站量测模型。
@@ -111,8 +110,8 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
 
   Matrix3d H_theta = Matrix3d::Zero();
   if (use_inekf) {
-    // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
-    H_theta = C_b_v * Skew(v_b) * C_bn.transpose();
+    // RI 坐标下速度类约束与姿态误差解耦
+    H_theta.setZero();
   } else {
     // 标准 ESKF
     H_theta = -C_b_v * Skew(v_b) * C_bn.transpose();
@@ -150,15 +149,9 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   // δ(C_n^b * omega_in^n) / δφ ≈ C_n^b * Skew(omega_in^n) 的贡献经杆臂传播
   // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
   // 注：仅当 lever_arm.norm() > 0.05m 时该项才有显著影响
-  if (lever_arm.norm() > 1e-3) {
-    Matrix3d H_theta_lever = Matrix3d::Zero();
-    if (use_inekf) {
-      H_theta_lever =
-          C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
-    } else {
-      H_theta_lever =
-          -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
-    }
+  if (!use_inekf && lever_arm.norm() > 1e-3) {
+    Matrix3d H_theta_lever =
+        -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
     model.H.block<2, 3>(0, StateIdx::kAtt) += H_theta_lever.block<2, 3>(1, 0);
   }
 
@@ -215,8 +208,8 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
 
   Matrix3d H_theta_full = Matrix3d::Zero();
   if (use_inekf) {
-    // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
-    H_theta_full = C_b_v * Skew(v_b) * C_bn.transpose();
+    // RI 坐标下，速度类约束的姿态列解耦
+    H_theta_full.setZero();
   } else {
     // 标准 ESKF
     H_theta_full = -C_b_v * Skew(v_b) * C_bn.transpose();
@@ -282,8 +275,10 @@ UwbModel ComputeGnssPositionModel(const State &state, const Vector3d &z_ecef,
   model.H.setZero(3, kStateDim);
   model.H.block<3, 3>(0, StateIdx::kPos) = Matrix3d::Identity();
   if (use_inekf) {
-    // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
-    model.H.block<3, 3>(0, StateIdx::kAtt) = -Skew(lever_ned);
+    // RI 坐标: H_phi = -(Skew(p_ned_local) + Skew(lever_ned))
+    Vector3d p_ned_local = R_ne.transpose() * (state.p - fej->p_init_ecef);
+    model.H.block<3, 3>(0, StateIdx::kAtt) =
+        -(Skew(p_ned_local) + Skew(lever_ned));
   } else {
     // 标准 ESKF
     model.H.block<3, 3>(0, StateIdx::kAtt) = Skew(lever_ned);
@@ -334,12 +329,16 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
   // H_v = I_3
   model.H.block<3, 3>(0, StateIdx::kVel) = Matrix3d::Identity();
 
-  // H_φ：InEKF 与标准 ESKF 仅符号相反
+  // H_φ 基础项（加法误差坐标下）
   Matrix3d H_phi_1 = -Skew(omega_in_n) * Skew(C_bn * state.gnss_lever_arm);
   Vector3d Cb_l_cross_omega_H = C_bn * Skew(state.gnss_lever_arm) * omega_ib_corr;
   Matrix3d H_phi_2 = -Skew(Cb_l_cross_omega_H);
   Matrix3d H_phi = H_phi_1 + H_phi_2;
-  model.H.block<3, 3>(0, StateIdx::kAtt) = use_inekf ? -H_phi : H_phi;
+  if (use_inekf) {
+    model.H.block<3, 3>(0, StateIdx::kAtt) = -H_phi - Skew(v_ned);
+  } else {
+    model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
+  }
 
   // H_bg = C_b^n * Skew(l_gnss) * diag(1-sg)
   model.H.block<3, 3>(0, StateIdx::kBg) =

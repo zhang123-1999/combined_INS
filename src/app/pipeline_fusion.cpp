@@ -1134,17 +1134,15 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
        << " mode="
        << (options.init.use_legacy_mounting_base_logic ? "legacy" : "constraints_base")
        << "\n";
-  engine.Initialize(x0, P0);
 
   FejManager fej;
   fej.Enable(options.fej.enable);
   engine.SetFejManager(fej.enabled ? &fej : nullptr);
+  engine.Initialize(x0, P0);
   cout << "[Init] InEKF: " << (fej.enabled ? "ON" : "OFF") << "\n";
   if (fej.enabled) {
-    const ImuData &imu_probe =
-        (dataset.imu.size() > 1) ? dataset.imu[1] : dataset.imu.front();
-    ValidateInEkfHSignConsistencyOrThrow(options, x0, mounting_base_rpy,
-                                         imu_probe);
+    cout << "[Init] RI Jacobian sign consistency check skipped "
+         << "(new InEKF H is not expected to be opposite-sign to ESKF)\n";
   }
   cout << "[Init] Ablation: "
        << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
