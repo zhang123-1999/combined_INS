@@ -293,6 +293,11 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   G.block<3, 3>(StateIdx::kVel, 0) = -C_bn;       // acc noise → velocity
   // 姿态误差 φ 在 NED 系，陀螺白噪声在 body 系，需经 C_b^n 映射。
   G.block<3, 3>(StateIdx::kAtt, 3) = -C_bn;      // gyro noise → attitude
+  if (use_inekf) {
+    // RI-EKF: ξ_v = δv + (v^n ×)ξ_φ
+    // 陀螺白噪声经姿态误差耦合后还会直接驱动 ξ_v。
+    G.block<3, 3>(StateIdx::kVel, 3) = -Skew(v_ned) * C_bn;
+  }
   G.block<3, 3>(StateIdx::kBa, 6) = Matrix3d::Identity();   // ba process noise
   G.block<3, 3>(StateIdx::kBg, 9) = Matrix3d::Identity();   // bg process noise
   G.block<3, 3>(StateIdx::kSg, 12) = Matrix3d::Identity();  // sg process noise
