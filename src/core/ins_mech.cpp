@@ -1,5 +1,7 @@
 #include "core/eskf.h"
 
+#include <cassert>
+#include <cmath>
 #include <iostream>
 
 using namespace std;
@@ -148,7 +150,17 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
                                 const NoiseParams &np,
                                 Matrix<double, kStateDim, kStateDim> &Phi,
                                 Matrix<double, kStateDim, kStateDim> &Qd,
-                                bool use_inekf) {
+                                const FejManager *fej) {
+  bool use_inekf = (fej != nullptr && fej->enabled);
+
+  // 防御性检查：sigma 置零合法，但不允许 NaN/Inf。
+  assert(std::isfinite(np.sigma_sg));
+  assert(std::isfinite(np.sigma_sa));
+  assert(std::isfinite(np.sigma_odo_scale));
+  assert(std::isfinite(np.sigma_mounting));
+  assert(std::isfinite(np.sigma_lever_arm));
+  assert(std::isfinite(np.sigma_gnss_lever_arm));
+
   // 检查输入参数有效性
   if (std::abs(lat) > 1.57079632679 + 0.1) {
     std::cerr << "[BuildProcessModel] WARNING: lat out of range: " << lat << "\n";
@@ -176,10 +188,15 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
 
   // === 位置误差 δṙ^n ===
   // F_rr = -(ω_en^n ×)
-  F.block<3, 3>(0, 0) = -Skew(omega_en_n);
+  F.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = -Skew(omega_en_n);
   // F_rv = I
-  F.block<3, 3>(0, 3) = Matrix3d::Identity();
-  // F_rφ = 0（按 kf-gins-docs 状态转移矩阵）
+  F.block<3, 3>(StateIdx::kPos, StateIdx::kVel) = Matrix3d::Identity();
+  // F_rφ:
+  //   RI-EKF: 0（右不变误差下位置-姿态解耦）
+  //   ESKF: 当前工程实现沿用历史兼容值 0（最小风险）。
+  if (!use_inekf) {
+    F.block<3, 3>(StateIdx::kPos, StateIdx::kAtt).setZero();
+  }
 
   // === 速度误差 δv̇^n ===
   // F_vr: 地球曲率和重力梯度项
@@ -193,25 +210,25 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
               0.0,
               2.0 * (-omega_ie_n.x()) / (R_M + h);
   F_vr.col(0) = F_vr_col0;
-  F.block<3, 3>(3, 0) = F_vr;
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kPos) = F_vr;
 
   // F_vv = -(2ω_ie^n + ω_en^n) ×
-  F.block<3, 3>(3, 3) = -Skew(2.0 * omega_ie_n + omega_en_n);
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = -Skew(2.0 * omega_ie_n + omega_en_n);
 
   if (use_inekf) {
     // RI-EKF: F_vφ = -(a_m^n ×)
-    F.block<3, 3>(3, 6) = -Skew(a_m_ned);
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = -Skew(a_m_ned);
   } else {
     // 标准 ESKF: F_vφ = (a_m^n ×)
-    F.block<3, 3>(3, 6) = Skew(a_m_ned);
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = Skew(a_m_ned);
   }
 
   // F_vba = -C_b^n（标准ESKF约定）
-  F.block<3, 3>(3, 9) = -C_bn;
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -C_bn;
 
   // F_vsa = -C_b^n * diag(f^b)（标准ESKF约定）
   Matrix3d diag_fb = f_b.asDiagonal();
-  F.block<3, 3>(3, 18) = -C_bn * diag_fb;
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kSa) = -C_bn * diag_fb;
 
   // === 姿态误差 φ̇ ===
   // F_φr = ∂ω_in^n/∂r
@@ -224,34 +241,34 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   F_phir(1, 2) = -v_ned.x() / ((R_M + h) * (R_M + h));
   F_phir(2, 0) += -v_ned.y() / ((R_M + h) * (R_N + h) * cos(lat) * cos(lat));
   F_phir(2, 2) = -v_ned.y() * tan(lat) / ((R_N + h) * (R_N + h));
-  F.block<3, 3>(6, 0) = F_phir;
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kPos) = F_phir;
 
   // F_φv = ∂ω_in^n/∂v
   Matrix3d F_phiv = Matrix3d::Zero();
   F_phiv(0, 1) = 1.0 / (R_N + h);
   F_phiv(1, 0) = -1.0 / (R_M + h);
   F_phiv(2, 1) = -tan(lat) / (R_N + h);
-  F.block<3, 3>(6, 3) = F_phiv;
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kVel) = F_phiv;
 
   // RI-EKF 与标准 ESKF 在该项一致：F_φφ = -(ω_in^n ×)
-  F.block<3, 3>(6, 6) = -Skew(omega_in_n);
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = -Skew(omega_in_n);
 
   // F_φbg = -C_b^n（标准ESKF约定）
-  F.block<3, 3>(6, 12) = -C_bn;
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -C_bn;
 
   // F_φsg = -C_b^n * diag(ω_ib^b)（标准ESKF约定）
   Matrix3d diag_wib = omega_ib_b.asDiagonal();
-  F.block<3, 3>(6, 15) = -C_bn * diag_wib;
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -C_bn * diag_wib;
 
   // === IMU误差（马尔可夫模型）===
   double T = np.markov_corr_time;
   if (T > 0.0) {
     double invT = 1.0 / T;
     Matrix3d neg_invT_I = -invT * Matrix3d::Identity();
-    F.block<3, 3>(9,  9)  = neg_invT_I;   // ba
-    F.block<3, 3>(12, 12) = neg_invT_I;   // bg
-    F.block<3, 3>(15, 15) = neg_invT_I;   // sg
-    F.block<3, 3>(18, 18) = neg_invT_I;   // sa
+    F.block<3, 3>(StateIdx::kBa, StateIdx::kBa) = neg_invT_I;  // ba
+    F.block<3, 3>(StateIdx::kBg, StateIdx::kBg) = neg_invT_I;  // bg
+    F.block<3, 3>(StateIdx::kSg, StateIdx::kSg) = neg_invT_I;  // sg
+    F.block<3, 3>(StateIdx::kSa, StateIdx::kSa) = neg_invT_I;  // sa
   }
   // odo_scale, mounting, lever_arm, gnss_lever_arm 保持随机常数
 
@@ -272,23 +289,24 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   // 噪声驱动矩阵 G（28 维噪声：acc(3), gyro(3), ba(3), bg(3), sg(3), sa(3), odo_scale(1), mounting_roll(1), mounting_pitch(1), mounting_yaw(1), lever(3), gnss_lever(3) = 28）
   constexpr int kNoiseDim = 28;
   Matrix<double, kStateDim, kNoiseDim> G = Matrix<double, kStateDim, kNoiseDim>::Zero();
-  G.block<3, 3>(3, 0) = -C_bn;                    // acc noise → velocity
+  G.block<3, 3>(StateIdx::kVel, 0) = -C_bn;       // acc noise → velocity
   // 姿态误差 φ 在 NED 系，陀螺白噪声在 body 系，需经 C_b^n 映射。
-  G.block<3, 3>(6, 3) = -C_bn;                   // gyro noise → attitude
-  G.block<3, 3>(9, 6) = Matrix3d::Identity();    // ba process noise
-  G.block<3, 3>(12, 9) = Matrix3d::Identity();   // bg process noise
-  G.block<3, 3>(15, 12) = Matrix3d::Identity();  // sg process noise
-  G.block<3, 3>(18, 15) = Matrix3d::Identity();  // sa process noise
-  G(21, 18) = 1.0;   // odo_scale
-  G(22, 19) = 1.0;   // mounting_roll
-  G(23, 20) = 1.0;   // mounting_pitch
-  G(24, 21) = 1.0;   // mounting_yaw
-  G.block<3, 3>(25, 22) = Matrix3d::Identity();  // lever_arm (state indices 25-27, noise indices 22-24)
-  G.block<3, 3>(28, 25) = Matrix3d::Identity();  // gnss_lever_arm (state indices 28-30, noise indices 25-27)
+  G.block<3, 3>(StateIdx::kAtt, 3) = -C_bn;      // gyro noise → attitude
+  G.block<3, 3>(StateIdx::kBa, 6) = Matrix3d::Identity();   // ba process noise
+  G.block<3, 3>(StateIdx::kBg, 9) = Matrix3d::Identity();   // bg process noise
+  G.block<3, 3>(StateIdx::kSg, 12) = Matrix3d::Identity();  // sg process noise
+  G.block<3, 3>(StateIdx::kSa, 15) = Matrix3d::Identity();  // sa process noise
+  G(StateIdx::kOdoScale, 18) = 1.0;     // odo_scale
+  G(StateIdx::kMountRoll, 19) = 1.0;    // mounting_roll
+  G(StateIdx::kMountPitch, 20) = 1.0;   // mounting_pitch
+  G(StateIdx::kMountYaw, 21) = 1.0;     // mounting_yaw
+  G.block<3, 3>(StateIdx::kLever, 22) = Matrix3d::Identity();      // lever_arm
+  G.block<3, 3>(StateIdx::kGnssLever, 25) = Matrix3d::Identity();  // gnss_lever_arm
 
   // 连续时间噪声协方差 Qc
   // 马尔可夫模型: sigma 为不稳定性（稳态标准差），驱动噪声 σ_w = σ_ss * √(2/T)
   // 随机游走: sigma 直接作为驱动噪声密度
+  // 注：sigma 在消融模式下可置零，对应 Qd 分量为零；此路径无除零风险。
   double ba_w, bg_w, sg_w, sa_w;
   if (T > 0.0) {
     double scale = sqrt(2.0 / T);

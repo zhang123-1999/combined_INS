@@ -132,13 +132,14 @@ struct ConstraintConfig {
 /**
  * InEKF 配置（复用原 FEJ 配置节）。
  * `enable=true` 表示启用 Right-Invariant EKF 模式。
+ * 其余字段仅为兼容旧配置保留，当前实现中均为 no-op。
  */
 struct FejConfig {
   bool enable = false;
-  bool enable_layer2 = true;
-  int imu_window_size = 100;
-  double omega_threshold = 0.05;  // rad/s
-  double accel_threshold = 0.5;   // m/s^2
+  bool enable_layer2 = true;    // deprecated
+  int imu_window_size = 100;    // deprecated
+  double omega_threshold = 0.05;  // deprecated
+  double accel_threshold = 0.5;   // deprecated
 };
 
 /**

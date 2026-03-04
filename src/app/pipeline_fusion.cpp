@@ -8,7 +8,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
-#include <deque>
+#include <stdexcept>
 
 #include "app/diagnostics.h"
 #include "io/data_io.h"
@@ -118,6 +118,16 @@ bool ComputeNis(const EskfEngine &engine, const MatrixXd &H, const MatrixXd &R,
   return true;
 }
 
+bool AreOppositeJacobianBlocks(const MatrixXd &eskf_block,
+                               const MatrixXd &inekf_block,
+                               double tol,
+                               double &rel_err_out) {
+  double scale = std::max(1.0, std::max(eskf_block.norm(), inekf_block.norm()));
+  double rel_err = (eskf_block + inekf_block).norm() / scale;
+  rel_err_out = rel_err;
+  return std::isfinite(rel_err) && rel_err <= tol;
+}
+
 double ComputeRobustWeight(const ConstraintConfig &cfg, double whitened_norm) {
   if (!cfg.enable_robust_weighting) return 1.0;
   double k = std::max(1e-6, cfg.robust_tuning);
@@ -131,6 +141,83 @@ double ComputeRobustWeight(const ConstraintConfig &cfg, double whitened_norm) {
     }
   }
   return std::clamp(w, cfg.robust_min_weight, 1.0);
+}
+
+void ValidateInEkfHSignConsistencyOrThrow(const FusionOptions &options,
+                                          const State &seed_state,
+                                          const Vector3d &mounting_base_rpy,
+                                          const ImuData &imu_for_check) {
+  State probe = seed_state;
+  probe.v = Vector3d(8.0, -2.5, 0.4);
+  probe.q = NormalizeQuat(RpyToQuat(Vector3d(0.35, -0.22, 0.18)));
+  probe.bg = Vector3d(0.01, -0.02, 0.03);
+  probe.sg = Vector3d(150e-6, -80e-6, 60e-6);
+  probe.mounting_pitch = 1.5 * kDegToRad;
+  probe.mounting_yaw = -2.0 * kDegToRad;
+  probe.lever_arm = Vector3d(0.8, 0.2, -0.3);
+  probe.gnss_lever_arm = Vector3d(1.1, -0.25, 0.35);
+
+  Vector3d omega_ib_b_raw = Vector3d::Zero();
+  if (imu_for_check.dt > 1e-9) {
+    omega_ib_b_raw = imu_for_check.dtheta / imu_for_check.dt;
+  }
+
+  Vector3d rpy(mounting_base_rpy.x(),
+               mounting_base_rpy.y() + probe.mounting_pitch,
+               mounting_base_rpy.z() + probe.mounting_yaw);
+  Matrix3d C_b_v = QuatToRot(RpyToQuat(rpy));
+
+  double sigma_gnss = (options.noise.sigma_gnss_pos > 0.0)
+                          ? options.noise.sigma_gnss_pos
+                          : 1.0;
+  Vector3d sigma_gnss_vec = Vector3d::Constant(std::max(1e-3, sigma_gnss));
+  Vector3d z_gnss_probe = probe.p + Vector3d(3.0, -1.5, 2.0);
+
+  double sigma_odo = std::max(1e-3, options.constraints.sigma_odo);
+  double sigma_nhc_y = std::max(1e-3, options.constraints.sigma_nhc_y);
+  double sigma_nhc_z = std::max(1e-3, options.constraints.sigma_nhc_z);
+
+  FejManager fej_probe;
+  fej_probe.Enable(true);
+
+  auto gnss_eskf = MeasModels::ComputeGnssPositionModel(
+      probe, z_gnss_probe, sigma_gnss_vec, nullptr);
+  auto gnss_inekf = MeasModels::ComputeGnssPositionModel(
+      probe, z_gnss_probe, sigma_gnss_vec, &fej_probe);
+  auto odo_eskf = MeasModels::ComputeOdoModel(
+      probe, 7.5, C_b_v, omega_ib_b_raw, sigma_odo, nullptr);
+  auto odo_inekf = MeasModels::ComputeOdoModel(
+      probe, 7.5, C_b_v, omega_ib_b_raw, sigma_odo, &fej_probe);
+  auto nhc_eskf = MeasModels::ComputeNhcModel(
+      probe, C_b_v, omega_ib_b_raw, sigma_nhc_y, sigma_nhc_z, nullptr);
+  auto nhc_inekf = MeasModels::ComputeNhcModel(
+      probe, C_b_v, omega_ib_b_raw, sigma_nhc_y, sigma_nhc_z, &fej_probe);
+
+  const double tol = 1e-8;
+  double rel_gnss = 0.0;
+  double rel_odo = 0.0;
+  double rel_nhc = 0.0;
+  bool gnss_ok = AreOppositeJacobianBlocks(
+      gnss_eskf.H.block<3, 3>(0, StateIdx::kAtt),
+      gnss_inekf.H.block<3, 3>(0, StateIdx::kAtt),
+      tol, rel_gnss);
+  bool odo_ok = AreOppositeJacobianBlocks(
+      odo_eskf.H.block<1, 3>(0, StateIdx::kAtt),
+      odo_inekf.H.block<1, 3>(0, StateIdx::kAtt),
+      tol, rel_odo);
+  bool nhc_ok = AreOppositeJacobianBlocks(
+      nhc_eskf.H.block<2, 3>(0, StateIdx::kAtt),
+      nhc_inekf.H.block<2, 3>(0, StateIdx::kAtt),
+      tol, rel_nhc);
+
+  if (!(gnss_ok && odo_ok && nhc_ok)) {
+    cout << "[ERROR] InEKF H-matrix sign inconsistency detected"
+         << " (gnss_rel=" << rel_gnss
+         << ", odo_rel=" << rel_odo
+         << ", nhc_rel=" << rel_nhc << ")\n";
+    throw runtime_error("[ERROR] InEKF H-matrix sign inconsistency detected");
+  }
+  cout << "[Init] InEKF H-matrix sign consistency check: PASS\n";
 }
 
 bool IsWeakExcitation(const State &state, const ImuData &imu,
@@ -150,14 +237,14 @@ bool IsWeakExcitation(const State &state, const ImuData &imu,
 
 void ZeroExtrinsicSensitivity(MatrixXd &H, bool freeze_scale, bool freeze_mounting,
                               bool freeze_lever) {
-  if (freeze_scale && H.cols() > 21) {
-    H.col(21).setZero();
+  if (freeze_scale && H.cols() > StateIdx::kOdoScale) {
+    H.col(StateIdx::kOdoScale).setZero();
   }
-  if (freeze_mounting && H.cols() > 24) {
-    H.block(0, 22, H.rows(), 3).setZero();
+  if (freeze_mounting && H.cols() > StateIdx::kMountYaw) {
+    H.block(0, StateIdx::kMountRoll, H.rows(), 3).setZero();
   }
-  if (freeze_lever && H.cols() > 27) {
-    H.block(0, 25, H.rows(), 3).setZero();
+  if (freeze_lever && H.cols() > StateIdx::kLever + 2) {
+    H.block(0, StateIdx::kLever, H.rows(), 3).setZero();
   }
 }
 
@@ -174,51 +261,48 @@ bool CorrectConstraintWithRobustness(EskfEngine &engine, const string &tag, doub
     ZeroExtrinsicSensitivity(H, freeze_scale, freeze_mounting, freeze_lever);
   }
 
-  constexpr double kConstraintNoiseScale = 1.0;
-  MatrixXd R_eff = R * kConstraintNoiseScale;
-
-  double nis_pre = 0.0;
-  if (!ComputeNis(engine, H, R_eff, y, nis_pre)) {
-    ++stats.rejected_numeric;
-    return false;
-  }
-
-  double robust_w = ComputeRobustWeight(cfg, std::sqrt(std::max(0.0, nis_pre)));
-  if (cfg.enable_robust_weighting) {
-    R_eff /= (robust_w * robust_w);
-  }
-
-  double nis = 0.0;
-  if (!ComputeNis(engine, H, R_eff, y, nis)) {
+  // 先使用原始 R 做 NIS 门控，避免“先鲁棒放大 R 再门控”导致门控被削弱。
+  double nis_gate = 0.0;
+  if (!ComputeNis(engine, H, R, y, nis_gate)) {
     ++stats.rejected_numeric;
     return false;
   }
 
   int dof = std::max(1, static_cast<int>(y.size()));
   double gate = ChiSquareQuantile(dof, nis_prob);
-  if (cfg.enable_nis_gating && nis > gate) {
+  if (cfg.enable_nis_gating && nis_gate > gate) {
     ++stats.rejected_nis;
     if (cfg.enable_consistency_log &&
         (stats.rejected_nis <= 20 || (stats.rejected_nis % 5000) == 0)) {
       cout << "[Consistency] " << tag << " reject t=" << t
-           << " NIS=" << nis << " gate=" << gate
-           << " weight=" << robust_w << " R_scale=" << kConstraintNoiseScale << "\n";
+           << " NIS=" << nis_gate << " gate=" << gate << "\n";
     }
     return false;
   }
 
+  double robust_w = ComputeRobustWeight(cfg, std::sqrt(std::max(0.0, nis_gate)));
+  MatrixXd R_eff = R;
+  if (cfg.enable_robust_weighting) {
+    R_eff /= (robust_w * robust_w);
+  }
+
+  // 仅用于调试统计，不参与是否更新的决策。
+  double nis_update = 0.0;
+  (void)ComputeNis(engine, H, R_eff, y, nis_update);
+
   diag.Correct(engine, tag, t, y, H, R_eff, nullptr);
   ++stats.accepted;
-  stats.nis_sum += nis;
-  stats.nis_max = std::max(stats.nis_max, nis);
+  stats.nis_sum += nis_gate;
+  stats.nis_max = std::max(stats.nis_max, nis_gate);
   stats.robust_weight_sum += robust_w;
-  stats.noise_scale_sum += kConstraintNoiseScale;
+  stats.noise_scale_sum += 1.0;
   return true;
 }
 
 void PrintConstraintStats(const string &tag, const ConstraintUpdateStats &s) {
   if (s.seen <= 0) return;
   double accept_ratio = static_cast<double>(s.accepted) / static_cast<double>(s.seen);
+  // nis_mean/nis_max 记录的是门控阶段的原始 NIS（未做鲁棒加权前）。
   double nis_mean = (s.accepted > 0) ? s.nis_sum / static_cast<double>(s.accepted) : 0.0;
   double w_mean =
       (s.accepted > 0) ? s.robust_weight_sum / static_cast<double>(s.accepted) : 0.0;
@@ -245,22 +329,22 @@ StateMask BuildStateMask(const StateAblationConfig &cfg) {
     }
   };
   if (cfg.disable_gyro_scale) {
-    disable_range(15, 3);
+    disable_range(StateIdx::kSg, 3);
   }
   if (cfg.disable_accel_scale) {
-    disable_range(18, 3);
+    disable_range(StateIdx::kSa, 3);
   }
   if (cfg.disable_odo_scale) {
-    disable_range(21, 1);
+    disable_range(StateIdx::kOdoScale, 1);
   }
   if (cfg.disable_mounting) {
-    disable_range(22, 3);
+    disable_range(StateIdx::kMountRoll, 3);
   }
   if (cfg.disable_odo_lever_arm) {
-    disable_range(25, 3);
+    disable_range(StateIdx::kLever, 3);
   }
   if (cfg.disable_gnss_lever_arm) {
-    disable_range(28, 3);
+    disable_range(StateIdx::kGnssLever, 3);
   }
   return mask;
 }
@@ -401,51 +485,6 @@ bool DetectZupt(const ImuData &imu, const State &state,
   return (omega.norm() < config.zupt_max_gyro && acc_diff < config.zupt_max_acc);
 }
 
-void PushWindowSample(double value_sq, int window_size, deque<double> &buf,
-                      double &sum_sq) {
-  buf.push_back(value_sq);
-  sum_sq += value_sq;
-  while (static_cast<int>(buf.size()) > window_size) {
-    sum_sq -= buf.front();
-    buf.pop_front();
-  }
-}
-
-void UpdateFejLayer2Status(const ImuData &imu, const State &state,
-                           const FejConfig &cfg, FejManager &fej,
-                           deque<double> &omega_sq_buf,
-                           deque<double> &accel_sq_buf,
-                           double &omega_sq_sum,
-                           double &accel_sq_sum) {
-  if (!fej.enabled || imu.dt <= 1e-9) {
-    return;
-  }
-
-  Vector3d omega_b = imu.dtheta / imu.dt - state.bg;
-  Vector3d f_b = imu.dvel / imu.dt - state.ba;
-  double omega_norm = omega_b.norm();
-  Llh llh = EcefToLlh(state.p);
-  Matrix3d R_ne = RotNedToEcef(llh);
-  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
-  Vector3d f_n = C_bn * f_b;
-  Vector3d g_n = R_ne.transpose() * GravityEcef(state.p);
-  double accel_dev = (f_n + g_n).norm();
-
-  PushWindowSample(omega_norm * omega_norm, cfg.imu_window_size,
-                   omega_sq_buf, omega_sq_sum);
-  PushWindowSample(accel_dev * accel_dev, cfg.imu_window_size,
-                   accel_sq_buf, accel_sq_sum);
-
-  if (omega_sq_buf.empty() || accel_sq_buf.empty()) {
-    return;
-  }
-  double omega_rms = std::sqrt(omega_sq_sum / omega_sq_buf.size());
-  double accel_rms = std::sqrt(accel_sq_sum / accel_sq_buf.size());
-  fej.UpdateLayer2Flag(omega_rms, accel_rms,
-                       cfg.omega_threshold, cfg.accel_threshold,
-                       cfg.enable_layer2);
-}
-
 // ---------- 量测更新辅助函数 ----------
 
 /**
@@ -543,14 +582,9 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
   while (odo_idx < dataset.odo.rows()) {
     double t_odo = dataset.odo(odo_idx, 0) + cfg.odo_time_offset;
     if (t_odo > t_curr + gating.time_tolerance) break;
-    if (odo_min_interval > 0.0 &&
-        last_odo_update_t > -1e17 &&
-        (t_odo - last_odo_update_t) < odo_min_interval) {
-      ++odo_idx;
-      continue;
-    }
 
     double odo_vel = dataset.odo(odo_idx, 1);
+    bool interpolated_to_curr = false;
 
     // 时间插值
     int next = odo_idx + 1;
@@ -560,7 +594,15 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
       if (dt_odo > 1e-6 && t_curr >= t_odo && t_curr <= t_next) {
         double alpha = (t_curr - t_odo) / dt_odo;
         odo_vel += alpha * (dataset.odo(next, 1) - odo_vel);
+        interpolated_to_curr = true;
       }
+    }
+    double t_meas = interpolated_to_curr ? t_curr : t_odo;
+    if (odo_min_interval > 0.0 &&
+        last_odo_update_t > -1e17 &&
+        (t_meas - last_odo_update_t) < odo_min_interval) {
+      ++odo_idx;
+      continue;
     }
     last_odo_speed = odo_vel;
 
@@ -578,11 +620,11 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
     auto model = MeasModels::ComputeOdoModel(state, odo_vel,
                                               C_b_v, omega_ib_b_raw,
                                               cfg.sigma_odo, fej);
-    if (CorrectConstraintWithRobustness(engine, "ODO", t_odo, imu_curr, cfg,
+    if (CorrectConstraintWithRobustness(engine, "ODO", t_meas, imu_curr, cfg,
                                         model.y, model.H, model.R,
                                         true, true, true, cfg.odo_nis_gate_prob,
                                         diag, stats)) {
-      last_odo_update_t = t_odo;
+      last_odo_update_t = t_meas;
     }
     ++odo_idx;
   }
@@ -659,7 +701,7 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
                    const FusionOptions &options,
                    DiagnosticsEngine &diag,
                    const ImuData *imu_curr,
-                   FejManager *fej) {
+                   const FejManager *fej) {
   if (dataset.gnss.timestamps.size() == 0) return;
   constexpr double kSigmaPosMin = 1e-4;
   constexpr double kSigmaVelMin = 1e-4;
@@ -706,13 +748,16 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
     auto model = MeasModels::ComputeGnssPositionModel(engine.state(), gnss_pos,
                                                       gnss_std, fej);
 
-    diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R, nullptr);
-
-    if (fej != nullptr && fej->enabled && !fej->initialized) {
-      fej->Initialize(engine.state());
-      cout << "[InEKF] Initialized at t=" << fixed << setprecision(3)
-           << t_gnss << "\n";
+    // 诊断日志：观测姿态列范数。
+    {
+      double h_att_norm = model.H.block<3, 3>(0, StateIdx::kAtt).norm();
+      cout << "[GNSS_POS] t=" << fixed << setprecision(3) << t_gnss
+           << " mode="
+           << ((fej != nullptr && fej->enabled) ? "InEKF" : "ESKF")
+           << " | ||H_att||_F=" << setprecision(6) << h_att_norm << "\n";
     }
+
+    diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R, nullptr);
 
     // 如果存在GNSS速度数据，执行速度更新
     if (has_vel) {
@@ -901,101 +946,114 @@ Dataset LoadDataset(const FusionOptions &options) {
   if (!options.gnss_path.empty()) {
     // 检测GNSS文件列数 (13列=带速度, 7列=仅位置)，避免先读13列导致误报
     int gnss_cols = DetectNumericColumnCount(options.gnss_path);
-    if (gnss_cols > 0 && gnss_cols < 7) {
-      cout << "error: GNSS 文件列数不足（至少需要7列）: " << options.gnss_path << "\n";
+    if (gnss_cols <= 0) {
+      throw invalid_argument("error: GNSS 文件为空或无有效数值行: " + options.gnss_path);
+    }
+    if (gnss_cols < 7) {
+      throw invalid_argument("error: GNSS 文件列数不足（至少需要7列）: " + options.gnss_path);
     }
     bool has_velocity = (gnss_cols >= 13);
 
     MatrixXd gnss_mat = io::LoadMatrix(options.gnss_path, has_velocity ? 13 : 7);
-    if (gnss_mat.rows() > 0) {
-      data.gnss.timestamps = gnss_mat.col(0);
-      data.gnss.std = gnss_mat.block(0, 4, gnss_mat.rows(), 3);
+    if (gnss_mat.rows() <= 0) {
+      throw invalid_argument("error: GNSS 数据加载失败: " + options.gnss_path);
+    }
 
-      // 加载速度数据 (如果存在)
-      if (has_velocity && gnss_mat.cols() >= 13) {
-        data.gnss.velocities = gnss_mat.block(0, 7, gnss_mat.rows(), 3);
-        data.gnss.vel_std = gnss_mat.block(0, 10, gnss_mat.rows(), 3);
-      }
+    data.gnss.timestamps = gnss_mat.col(0);
+    data.gnss.std = gnss_mat.block(0, 4, gnss_mat.rows(), 3);
 
-      // [修复] 自动检测 GNSS 坐标格式并转换为 ECEF
-      bool gnss_is_lla = (gnss_mat.row(0).segment(1, 2).cwiseAbs().maxCoeff() < 200.0);
-      if (gnss_is_lla) {
-        MatrixXd gnss_ecef(gnss_mat.rows(), 3);
-        MatrixXd gnss_vel_ecef(gnss_mat.rows(), 3);
+    // 加载速度数据（如果文件包含速度列）
+    bool has_velocity_data = false;
+    if (has_velocity && gnss_mat.cols() >= 13) {
+      data.gnss.velocities = gnss_mat.block(0, 7, gnss_mat.rows(), 3);
+      data.gnss.vel_std = gnss_mat.block(0, 10, gnss_mat.rows(), 3);
+      has_velocity_data =
+          (data.gnss.velocities.rows() == gnss_mat.rows() &&
+           data.gnss.vel_std.rows() == gnss_mat.rows());
+    }
 
-        for (int i = 0; i < gnss_mat.rows(); ++i) {
-          double lat_rad = gnss_mat(i, 1) * kDegToRad;
-          double lon_rad = gnss_mat(i, 2) * kDegToRad;
-          double h = gnss_mat(i, 3);
-          Llh llh{lat_rad, lon_rad, h};
-          gnss_ecef.row(i) = LlhToEcef(llh).transpose();
+    // [修复] 自动检测 GNSS 坐标格式并转换为 ECEF
+    bool gnss_is_lla = (gnss_mat.row(0).segment(1, 2).cwiseAbs().maxCoeff() < 200.0);
+    if (gnss_is_lla) {
+      MatrixXd gnss_ecef(gnss_mat.rows(), 3);
+      MatrixXd gnss_vel_ecef(gnss_mat.rows(), 3);
 
-          // 转换速度从NED到ECEF
-          // GNSS_converted.txt 已在 convert_data4.py 中完成 NEU→NED 转换 (vd = -vu)
-          if (has_velocity && !data.gnss.velocities.isZero()) {
-            double vn = data.gnss.velocities(i, 0);  // North
-            double ve = data.gnss.velocities(i, 1);  // East
-            double vd = data.gnss.velocities(i, 2);  // Down (已由转换脚本处理)
-            Matrix3d R_ne = RotNedToEcef(lat_rad, lon_rad);
-            Vector3d v_ned(vn, ve, vd);
-            gnss_vel_ecef.row(i) = (R_ne * v_ned).transpose();
-          }
+      for (int i = 0; i < gnss_mat.rows(); ++i) {
+        double lat_rad = gnss_mat(i, 1) * kDegToRad;
+        double lon_rad = gnss_mat(i, 2) * kDegToRad;
+        double h = gnss_mat(i, 3);
+        Llh llh{lat_rad, lon_rad, h};
+        gnss_ecef.row(i) = LlhToEcef(llh).transpose();
+
+        // 转换速度从NED到ECEF
+        // GNSS_converted.txt 已在 convert_data4.py 中完成 NEU→NED 转换 (vd = -vu)
+        if (has_velocity_data) {
+          double vn = data.gnss.velocities(i, 0);  // North
+          double ve = data.gnss.velocities(i, 1);  // East
+          double vd = data.gnss.velocities(i, 2);  // Down (已由转换脚本处理)
+          Matrix3d R_ne = RotNedToEcef(lat_rad, lon_rad);
+          Vector3d v_ned(vn, ve, vd);
+          gnss_vel_ecef.row(i) = (R_ne * v_ned).transpose();
         }
-        data.gnss.positions = gnss_ecef;
-        if (has_velocity && !data.gnss.velocities.isZero()) {
-          data.gnss.velocities = gnss_vel_ecef;
-        }
-        cout << "[Load] GNSS data: " << gnss_mat.rows() << " records (converted LLA->ECEF)";
-        if (has_velocity && !data.gnss.velocities.isZero()) {
-          cout << " with velocity";
-        }
-        cout << "\n";
-      } else {
-        data.gnss.positions = gnss_mat.block(0, 1, gnss_mat.rows(), 3);
-        cout << "[Load] GNSS data: " << gnss_mat.rows() << " records (already ECEF)\n";
       }
+      data.gnss.positions = gnss_ecef;
+      if (has_velocity_data) {
+        data.gnss.velocities = gnss_vel_ecef;
+      }
+      cout << "[Load] GNSS data: " << gnss_mat.rows() << " records (converted LLA->ECEF)";
+      if (has_velocity_data) {
+        cout << " with velocity";
+      }
+      cout << "\n";
+    } else {
+      data.gnss.positions = gnss_mat.block(0, 1, gnss_mat.rows(), 3);
+      cout << "[Load] GNSS data: " << gnss_mat.rows() << " records (already ECEF)";
+      if (has_velocity_data) {
+        cout << " with velocity";
+      }
+      cout << "\n";
+    }
 
-      // [修复] 按 IMU 时间范围裁剪 GNSS 数据，避免将早期历史量测应用到初始状态
-      double t_imu_start = data.imu.empty() ? t0 : data.imu.front().t;
-      double t_imu_end = data.imu.empty() ? t1 : data.imu.back().t;
-      double tol = options.gating.time_tolerance;
-      vector<int> gnss_keep;
-      gnss_keep.reserve(data.gnss.timestamps.size());
-      for (int i = 0; i < data.gnss.timestamps.size(); ++i) {
-        double tg = data.gnss.timestamps(i);
-        if (tg + tol >= t_imu_start && tg - tol <= t_imu_end)
-          gnss_keep.push_back(i);
+    // [修复] 按 IMU 时间范围裁剪 GNSS 数据，避免将早期历史量测应用到初始状态
+    double t_imu_start = data.imu.empty() ? t0 : data.imu.front().t;
+    double t_imu_end = data.imu.empty() ? t1 : data.imu.back().t;
+    double tol = options.gating.time_tolerance;
+    vector<int> gnss_keep;
+    gnss_keep.reserve(data.gnss.timestamps.size());
+    for (int i = 0; i < data.gnss.timestamps.size(); ++i) {
+      double tg = data.gnss.timestamps(i);
+      if (tg + tol >= t_imu_start && tg - tol <= t_imu_end)
+        gnss_keep.push_back(i);
+    }
+    if (static_cast<int>(gnss_keep.size()) < data.gnss.timestamps.size()) {
+      int n_gnss = static_cast<int>(gnss_keep.size());
+      VectorXd new_ts(n_gnss);
+      MatrixXd new_pos(n_gnss, 3), new_std(n_gnss, 3);
+      bool has_gnss_vel =
+          (data.gnss.velocities.rows() == data.gnss.timestamps.size() &&
+           data.gnss.vel_std.rows() == data.gnss.timestamps.size());
+      MatrixXd new_vel, new_vel_std;
+      if (has_gnss_vel) {
+        new_vel.resize(n_gnss, 3);
+        new_vel_std.resize(n_gnss, 3);
       }
-      if (static_cast<int>(gnss_keep.size()) < data.gnss.timestamps.size()) {
-        int n_gnss = static_cast<int>(gnss_keep.size());
-        VectorXd new_ts(n_gnss);
-        MatrixXd new_pos(n_gnss, 3), new_std(n_gnss, 3);
-        bool has_gnss_vel =
-            (data.gnss.velocities.rows() == data.gnss.timestamps.size() &&
-             data.gnss.vel_std.rows() == data.gnss.timestamps.size());
-        MatrixXd new_vel, new_vel_std;
+      for (int i = 0; i < n_gnss; ++i) {
+        new_ts(i) = data.gnss.timestamps(gnss_keep[i]);
+        new_pos.row(i) = data.gnss.positions.row(gnss_keep[i]);
+        new_std.row(i) = data.gnss.std.row(gnss_keep[i]);
         if (has_gnss_vel) {
-          new_vel.resize(n_gnss, 3);
-          new_vel_std.resize(n_gnss, 3);
+          new_vel.row(i) = data.gnss.velocities.row(gnss_keep[i]);
+          new_vel_std.row(i) = data.gnss.vel_std.row(gnss_keep[i]);
         }
-        for (int i = 0; i < n_gnss; ++i) {
-          new_ts(i) = data.gnss.timestamps(gnss_keep[i]);
-          new_pos.row(i) = data.gnss.positions.row(gnss_keep[i]);
-          new_std.row(i) = data.gnss.std.row(gnss_keep[i]);
-          if (has_gnss_vel) {
-            new_vel.row(i) = data.gnss.velocities.row(gnss_keep[i]);
-            new_vel_std.row(i) = data.gnss.vel_std.row(gnss_keep[i]);
-          }
-        }
-        cout << "[Load] GNSS cropped: " << data.gnss.timestamps.size()
-             << " -> " << n_gnss << " (IMU time range)\n";
-        data.gnss.timestamps = new_ts;
-        data.gnss.positions = new_pos;
-        data.gnss.std = new_std;
-        if (has_gnss_vel) {
-          data.gnss.velocities = new_vel;
-          data.gnss.vel_std = new_vel_std;
-        }
+      }
+      cout << "[Load] GNSS cropped: " << data.gnss.timestamps.size()
+           << " -> " << n_gnss << " (IMU time range)\n";
+      data.gnss.timestamps = new_ts;
+      data.gnss.positions = new_pos;
+      data.gnss.std = new_std;
+      if (has_gnss_vel) {
+        data.gnss.velocities = new_vel;
+        data.gnss.vel_std = new_vel_std;
       }
     }
   }
@@ -1082,6 +1140,12 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   fej.Enable(options.fej.enable);
   engine.SetFejManager(fej.enabled ? &fej : nullptr);
   cout << "[Init] InEKF: " << (fej.enabled ? "ON" : "OFF") << "\n";
+  if (fej.enabled) {
+    const ImuData &imu_probe =
+        (dataset.imu.size() > 1) ? dataset.imu[1] : dataset.imu.front();
+    ValidateInEkfHSignConsistencyOrThrow(options, x0, mounting_base_rpy,
+                                         imu_probe);
+  }
   cout << "[Init] Ablation: "
        << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
        << " odo_lever=" << (active_ablation.disable_odo_lever_arm ? "OFF" : "ON")
@@ -1148,10 +1212,6 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   double last_odo_update_t = -1e18;
   ConstraintUpdateStats nhc_stats;
   ConstraintUpdateStats odo_stats;
-  deque<double> fej_omega_sq_buf;
-  deque<double> fej_accel_sq_buf;
-  double fej_omega_sq_sum = 0.0;
-  double fej_accel_sq_sum = 0.0;
 
   engine.AddImu(dataset.imu[0]);
   for (size_t i = 1; i < dataset.imu.size(); ++i) {
@@ -1161,12 +1221,8 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
     double t = dataset.imu[i].t;
     double dt = dataset.imu[i].dt;
 
-    UpdateFejLayer2Status(dataset.imu[i], engine.state(), options.fej, fej,
-                          fej_omega_sq_buf, fej_accel_sq_buf,
-                          fej_omega_sq_sum, fej_accel_sq_sum);
-
     const FejManager *fej_ptr = fej.enabled ? &fej : nullptr;
-    FejManager *fej_ptr_mut = fej.enabled ? &fej : nullptr;
+    const FejManager *fej_ptr_mut = fej.enabled ? &fej : nullptr;
 
     // 1. ZUPT 更新
     bool zupt_ready = RunZuptUpdate(engine, dataset.imu[i], options.constraints,

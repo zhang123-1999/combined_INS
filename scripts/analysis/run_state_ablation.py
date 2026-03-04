@@ -62,8 +62,23 @@ def interp_truth(sol_t: np.ndarray, truth_t: np.ndarray, truth_xyz: np.ndarray) 
 
 
 def load_sol(sol_path: Path) -> tuple[np.ndarray, np.ndarray]:
-  df = pd.read_csv(sol_path, sep=r"\s+")
-  return df["timestamp"].to_numpy(), df[["fused_x", "fused_y", "fused_z"]].to_numpy()
+  try:
+    df = pd.read_csv(sol_path, sep=r"\s+")
+    expected = {"timestamp", "fused_x", "fused_y", "fused_z"}
+    if expected.issubset(df.columns):
+      return df["timestamp"].to_numpy(), df[["fused_x", "fused_y", "fused_z"]].to_numpy()
+
+    # Header-less files can be parsed with the first data row as header by default.
+    # Reload with header=None to keep all numeric rows.
+    raw = pd.read_csv(sol_path, sep=r"\s+", header=None)
+    if raw.shape[1] < 4:
+      raise RuntimeError(f"expected >=4 columns, got {raw.shape[1]}")
+
+    print(f"[WARN] load_sol: expected columns not found, fallback to [0,1,2,3]: {sol_path}")
+    arr = raw.iloc[:, :4].to_numpy(dtype=float)
+    return arr[:, 0], arr[:, 1:4]
+  except Exception as exc:
+    raise RuntimeError(f"load_sol failed for {sol_path}: {exc}") from exc
 
 
 def run_cmd(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:

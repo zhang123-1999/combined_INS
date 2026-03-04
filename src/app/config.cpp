@@ -297,9 +297,6 @@ GatingConfig ApplyGatingNode(const GatingConfig &base, const YAML::Node &node,
   }
   if (node["max_dt"]) {
     double max_dt = node["max_dt"].as<double>();
-    if (max_dt <= 0.0) {
-      ThrowConfigError("error: " + context + ".gating.max_dt 必须为正");
-    }
     out.max_dt = max_dt;
   }
   return out;
@@ -708,13 +705,10 @@ void ValidateConstraintsConfig(const ConstraintConfig &config,
 }
 
 void ValidateFejConfig(const FejConfig &config, const string &context) {
-  if (config.imu_window_size <= 0) {
+  if (!std::isfinite(config.omega_threshold) ||
+      !std::isfinite(config.accel_threshold)) {
     ThrowConfigError("error: " + context +
-                     ".fej.imu_window_size 必须为正整数");
-  }
-  if (config.omega_threshold <= 0.0 || config.accel_threshold <= 0.0) {
-    ThrowConfigError("error: " + context +
-                     ".fej.omega_threshold/accel_threshold 必须为正");
+                     ".fej.omega_threshold/accel_threshold 必须为有限数值");
   }
 }
 

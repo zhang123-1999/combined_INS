@@ -68,12 +68,12 @@ struct MeasUpdateLog {
 void LogMeasUpdate(const string &tag, double t, const VectorXd &y, const VectorXd &dx) {
   cout << "[Diag] " << tag << " update t=" << t
        << " y=" << y.transpose() << " y_norm=" << y.norm();
-  if (dx.size() == 15) {
-    cout << " dp=" << dx.segment<3>(0).transpose()
-         << " dv=" << dx.segment<3>(3).transpose()
-         << " dtheta=" << dx.segment<3>(6).transpose()
-         << " dba=" << dx.segment<3>(9).transpose()
-         << " dbg=" << dx.segment<3>(12).transpose();
+  if (dx.size() == kStateDim) {
+    cout << " dp=" << dx.segment<3>(StateIdx::kPos).transpose()
+         << " dv=" << dx.segment<3>(StateIdx::kVel).transpose()
+         << " dtheta=" << dx.segment<3>(StateIdx::kAtt).transpose()
+         << " dba=" << dx.segment<3>(StateIdx::kBa).transpose()
+         << " dbg=" << dx.segment<3>(StateIdx::kBg).transpose();
   } else {
     cout << " dx=" << dx.transpose();
   }

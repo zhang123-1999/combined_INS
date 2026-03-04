@@ -22,11 +22,11 @@ fusion:
     enabled: true
     head_ratio: 0.3
   fej:
-    enable: true
-    enable_layer2: true
-    imu_window_size: 100
-    omega_threshold: 0.05
-    accel_threshold: 0.5
+    enable: true           # true = 启用 Right-Invariant InEKF（SE2(3)）
+    enable_layer2: true    # deprecated: no-op
+    imu_window_size: 100   # deprecated: no-op
+    omega_threshold: 0.05  # deprecated: no-op
+    accel_threshold: 0.5   # deprecated: no-op
   noise:
     sigma_acc: 0.05
     sigma_gyro: 0.005

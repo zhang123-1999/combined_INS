@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 using namespace std;
 using namespace Eigen;
@@ -213,6 +214,9 @@ Vector3d GravityEcef(const Vector3d &ecef) {
  */
 // 简单双点线性插值（超界时返回端点值）
 double LinearInterp(const VectorXd &t, const VectorXd &v, double query) {
+  if (t.size() == 0 || v.size() == 0 || t.size() != v.size()) {
+    throw invalid_argument("LinearInterp requires non-empty equal-sized inputs");
+  }
   if (query <= t[0]) return v[0];
   if (query >= t[t.size() - 1]) return v[v.size() - 1];
   auto it = lower_bound(t.data(), t.data() + t.size(), query);
@@ -246,7 +250,8 @@ Vector4d QuatConjugate(const Vector4d &q) {
 
 double QuatDeltaAngleRad(const Vector4d &q0, const Vector4d &q1) {
   Vector4d dq = NormalizeQuat(QuatMultiply(QuatConjugate(q0), q1));
-  double w = Clamp(dq[0], -1.0, 1.0);
+  // q 与 -q 代表同一姿态，取绝对值避免双覆盖导致的 360deg 伪差。
+  double w = std::abs(Clamp(dq[0], -1.0, 1.0));
   return 2.0 * acos(w);
 }
 

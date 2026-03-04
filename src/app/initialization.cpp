@@ -130,22 +130,22 @@ bool InitializeState(const FusionOptions &options, const vector<ImuData> &imu,
       double var_mounting_yaw = (options.init.std_mounting_yaw * EIGEN_PI / 180.0) *
                                 (options.init.std_mounting_yaw * EIGEN_PI / 180.0);
 
-      P0.diagonal().segment<3>(0) = var_pos;
-      P0.diagonal().segment<3>(3) = var_vel;
-      P0.diagonal().segment<3>(6) = var_att;
-      P0.diagonal().segment<3>(9) = var_ba;       // [修复] 之前遗漏了 ba 的 P0 赋值
-      P0.diagonal().segment<3>(12) = var_bg;
-      P0.diagonal().segment<3>(15) = var_sg;      // [新增] 陀螺比例因子
-      P0.diagonal().segment<3>(18) = var_sa;      // [新增] 加速度计比例因子
-      P0(21, 21) = var_odo_scale;
-      P0(22, 22) = var_mounting_roll;   // [修复] 添加缺失的 mounting_roll
-      P0(23, 23) = var_mounting_pitch;
-      P0(24, 24) = var_mounting_yaw;
+      P0.diagonal().segment<3>(StateIdx::kPos) = var_pos;
+      P0.diagonal().segment<3>(StateIdx::kVel) = var_vel;
+      P0.diagonal().segment<3>(StateIdx::kAtt) = var_att;
+      P0.diagonal().segment<3>(StateIdx::kBa) = var_ba;       // [修复] 之前遗漏了 ba 的 P0 赋值
+      P0.diagonal().segment<3>(StateIdx::kBg) = var_bg;
+      P0.diagonal().segment<3>(StateIdx::kSg) = var_sg;      // [新增] 陀螺比例因子
+      P0.diagonal().segment<3>(StateIdx::kSa) = var_sa;      // [新增] 加速度计比例因子
+      P0(StateIdx::kOdoScale, StateIdx::kOdoScale) = var_odo_scale;
+      P0(StateIdx::kMountRoll, StateIdx::kMountRoll) = var_mounting_roll;   // [修复] 添加缺失的 mounting_roll
+      P0(StateIdx::kMountPitch, StateIdx::kMountPitch) = var_mounting_pitch;
+      P0(StateIdx::kMountYaw, StateIdx::kMountYaw) = var_mounting_yaw;
       Vector3d var_lever = options.init.std_lever_arm.array().square();
-      P0.diagonal().segment<3>(25) = var_lever;  // [修复] lever_arm 从 25 开始
+      P0.diagonal().segment<3>(StateIdx::kLever) = var_lever;  // [修复] lever_arm 从 25 开始
       // GNSS天线杆臂 (28-30)：初值未知，需要足够大的初始方差
       Vector3d var_gnss_lever = options.init.std_gnss_lever_arm.array().square();
-      P0.diagonal().segment<3>(28) = var_gnss_lever;  // [修复] gnss_lever_arm 从 28 开始
+      P0.diagonal().segment<3>(StateIdx::kGnssLever) = var_gnss_lever;  // [修复] gnss_lever_arm 从 28 开始
   } else {
       // Manually assign to avoid Eigen static assertion issues with const params
       for(int i = 0; i < kStateDim; ++i) {

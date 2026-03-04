@@ -1,6 +1,7 @@
 #include "app/fusion.h"
 
 #include <iostream>
+#include <limits>
 
 #include "io/data_io.h"
 #include "utils/math_utils.h"
@@ -27,16 +28,6 @@ EvaluationSummary EvaluateFusion(const FusionResult &result, const Dataset &data
     return summary;
   }
 
-  // 将真值时间插值到融合时间轴
-  MatrixXd truth_interp = MatrixXd::Zero(n, 3);
-  for (int j = 0; j < 3; ++j) {
-    VectorXd col = dataset.truth.positions.col(j);
-    const VectorXd &t_truth = dataset.truth.timestamps;
-    for (int i = 0; i < n; ++i) {
-      truth_interp(i, j) = LinearInterp(t_truth, col, result.time_axis[i]);
-    }
-  }
-
   MatrixXd fused_mat(n, 3), fused_vel(n, 3), fused_quat(n, 4);
   for (int i = 0; i < n; ++i) {
     fused_mat.row(i) = result.fused_positions[i];
@@ -44,8 +35,25 @@ EvaluationSummary EvaluateFusion(const FusionResult &result, const Dataset &data
     fused_quat.row(i) = result.fused_quaternions[i];
   }
 
-  // 计算融合 RMSE
-  summary.rmse_fused = RMSE(fused_mat, truth_interp);
+  // 将真值时间插值到融合时间轴并计算 RMSE（真值缺失时仅输出轨迹，不计算 RMSE）。
+  bool has_truth = dataset.truth.timestamps.size() >= 2 &&
+                   dataset.truth.positions.rows() == dataset.truth.timestamps.size() &&
+                   dataset.truth.positions.cols() >= 3;
+  if (has_truth) {
+    MatrixXd truth_interp = MatrixXd::Zero(n, 3);
+    for (int j = 0; j < 3; ++j) {
+      VectorXd col = dataset.truth.positions.col(j);
+      const VectorXd &t_truth = dataset.truth.timestamps;
+      for (int i = 0; i < n; ++i) {
+        truth_interp(i, j) = LinearInterp(t_truth, col, result.time_axis[i]);
+      }
+    }
+    summary.rmse_fused = RMSE(fused_mat, truth_interp);
+  } else {
+    cout << "[Warn] 真值不可用，跳过 RMSE 计算（仅输出解算结果）\n";
+    double nan_v = std::numeric_limits<double>::quiet_NaN();
+    summary.rmse_fused = Vector3d(nan_v, nan_v, nan_v);
+  }
 
   // 组装输出矩阵：时间、融合 XYZ、融合速度 XYZ、融合姿态欧拉角、安装角（deg）、
   // ODO比例、sg(ppm)、sa(ppm)、ba、bg、ODO杆臂、GNSS杆臂

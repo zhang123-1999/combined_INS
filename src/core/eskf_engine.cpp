@@ -70,9 +70,9 @@ bool EskfEngine::Predict() {
   PropagationResult res = InsMech::Propagate(state_, prev_imu_, curr_imu_);
 
   // 计算NED速度和地理参数（用于NED系下的误差状态传播）
-  Llh llh = EcefToLlh(state_.p);
+  Llh llh = EcefToLlh(res.state.p);
   Matrix3d R_ne = RotNedToEcef(llh);
-  Vector3d v_ned = R_ne.transpose() * state_.v;  // ECEF速度转NED速度
+  Vector3d v_ned = R_ne.transpose() * res.state.v;  // ECEF速度转NED速度
 
   // 惯导传播 + 过程噪声离散化（NED系下的完整误差模型）
   Matrix<double, kStateDim, kStateDim> Phi, Qd;
@@ -85,12 +85,10 @@ bool EskfEngine::Predict() {
     Vector3d sf_g = Vector3d::Ones() - state_.sg;
     omega_ib_b_corr = sf_g.cwiseProduct(omega_ib_unbiased);
   }
-  bool use_inekf = (fej_ != nullptr && fej_->enabled);
-
   InsMech::BuildProcessModel(R_ne.transpose() * res.Cbn,  // C_b^n = R_e^n * C_b^e
                              res.f_b, omega_ib_b_corr, v_ned,
                              llh.lat, llh.h, curr_imu_.dt, noise_, Phi, Qd,
-                             use_inekf);
+                             fej_);
   state_ = res.state;
   P_ = Phi * P_ * Phi.transpose() + Qd;
   P_ = 0.5 * (P_ + P_.transpose());
@@ -127,7 +125,16 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
   ApplyStateMaskToDx(dx, update_mask);
 
   // NaN/发散保护：如果修正量含 NaN 或姿态/位置修正异常，跳过本次更新
-  if (!dx.allFinite() || dx.segment<3>(0).norm() > 1e6) {
+  if (!dx.allFinite()) {
+    return false;
+  }
+  if (dx.segment<3>(StateIdx::kPos).norm() > 1e6) {  // >1000km
+    return false;
+  }
+  if (dx.segment<3>(StateIdx::kVel).norm() > 1e3) {  // >1000m/s
+    return false;
+  }
+  if (dx.segment<3>(StateIdx::kAtt).norm() > EIGEN_PI) {  // >180deg
     return false;
   }
 
@@ -178,18 +185,18 @@ MatrixXd EskfEngine::ComputeKalmanGain(const MatrixXd &H,
  * @param dx 误差状态增量 [δr^n, δv^n, φ, dba, dbg, dsg, dsa, ...]
  */
 void EskfEngine::InjectErrorState(const VectorXd &dx) {
-  Vector3d dr_ned = dx.segment<3>(0);  // NED位置误差
-  Vector3d dv_ned = dx.segment<3>(3);  // NED速度误差
-  Vector3d dphi_ned = dx.segment<3>(6);  // 姿态误差（NED系）
-  Vector3d dba = dx.segment<3>(9);
-  Vector3d dbg = dx.segment<3>(12);
-  Vector3d dsg = dx.segment<3>(15);
-  Vector3d dsa = dx.segment<3>(18);
-  double dscale = dx(21);
-  double d_mounting_roll = dx(22);
-  double d_mounting_pitch = dx(23);
-  double d_mounting_yaw = dx(24);
-  Vector3d dlever = dx.segment<3>(25);
+  Vector3d dr_ned = dx.segment<3>(StateIdx::kPos);  // NED位置误差
+  Vector3d dv_ned = dx.segment<3>(StateIdx::kVel);  // NED速度误差
+  Vector3d dphi_ned = dx.segment<3>(StateIdx::kAtt);  // 姿态误差（NED系）
+  Vector3d dba = dx.segment<3>(StateIdx::kBa);
+  Vector3d dbg = dx.segment<3>(StateIdx::kBg);
+  Vector3d dsg = dx.segment<3>(StateIdx::kSg);
+  Vector3d dsa = dx.segment<3>(StateIdx::kSa);
+  double dscale = dx(StateIdx::kOdoScale);
+  double d_mounting_roll = dx(StateIdx::kMountRoll);
+  double d_mounting_pitch = dx(StateIdx::kMountPitch);
+  double d_mounting_yaw = dx(StateIdx::kMountYaw);
+  Vector3d dlever = dx.segment<3>(StateIdx::kLever);
 
   if (correction_guard_.enabled) {
     dscale = std::clamp(dscale, -correction_guard_.max_odo_scale_step,
@@ -223,8 +230,11 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   state_.p += dr_ecef;
   state_.v += dv_ecef;
 
-  // InEKF Right-Invariant 姿态注入：
-  // 误差状态 φ 在 NED 系定义，先转到 ECEF，再进行左乘注入。
+  // InEKF Right-Invariant 姿态注入（左乘）：
+  // q_new = Exp(dphi_ecef) ⊗ q
+  // 标准 ESKF（右乘等效写法）：
+  // q_new = q ⊗ Exp(-dphi_ecef)
+  // 误差状态 φ 在 NED 系定义，先转到 ECEF 后注入。
   Vector3d dphi_ecef = R_ne * dphi_ned;
   bool use_inekf = (fej_ != nullptr && fej_->enabled);
   if (use_inekf) {
@@ -247,7 +257,7 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   state_.lever_arm += dlever;
 
   // GNSS杆臂误差注入
-  Vector3d dgnss_lever = dx.segment<3>(28);
+  Vector3d dgnss_lever = dx.segment<3>(StateIdx::kGnssLever);
   state_.gnss_lever_arm += dgnss_lever;
 
   if (correction_guard_.enabled) {
@@ -345,11 +355,11 @@ void EskfEngine::ApplyCovarianceFloor() {
   const double bg_floor = std::max(0.0, covariance_floor_.bg_var);
 
   for (int i = 0; i < 3; ++i) {
-    apply_floor(i, pos_floor);        // position
-    apply_floor(3 + i, vel_floor);    // velocity
-    apply_floor(6 + i, att_floor);    // attitude
-    apply_floor(12 + i, bg_floor);    // gyro bias
-    apply_floor(22 + i, mounting_floor);  // mounting
+    apply_floor(StateIdx::kPos + i, pos_floor);        // position
+    apply_floor(StateIdx::kVel + i, vel_floor);        // velocity
+    apply_floor(StateIdx::kAtt + i, att_floor);        // attitude
+    apply_floor(StateIdx::kBg + i, bg_floor);          // gyro bias
+    apply_floor(StateIdx::kMountRoll + i, mounting_floor);  // mounting
   }
 
   P_ = 0.5 * (P_ + P_.transpose());

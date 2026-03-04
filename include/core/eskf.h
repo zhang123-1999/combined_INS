@@ -2,6 +2,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <Eigen/Dense>
 
 #include "utils/math_utils.h"
@@ -36,61 +37,17 @@ struct State {
 };
 
 /**
- * InEKF 开关管理器（复用 FEJ 接口以避免上层改动）。
- * 保留原有字段与方法签名以兼容调用方，冻结点语义已废弃。
+ * InEKF 模式开关。
+ * 说明：保留 FejManager 类型名仅用于兼容旧调用点，字段不再承载 FEJ 冻结语义。
  */
-struct FejManager {
+struct InEkfConfig {
   bool enabled = false;
-  bool initialized = false;
-  bool use_layer2 = false;
 
-  // 第一层 FEJ（必须）
-  Matrix3d C_be_fej{Matrix3d::Identity()};  // body->ECEF
-  Matrix3d C_bn_fej{Matrix3d::Identity()};  // body->NED
-  Vector3d l_gnss_fej{Vector3d::Zero()};
-  Vector3d l_odo_fej{Vector3d::Zero()};
-
-  // 第二层 FEJ（条件）
-  Vector3d b_g_fej{Vector3d::Zero()};
-  Vector3d b_a_fej{Vector3d::Zero()};
-  Vector3d s_g_fej{Vector3d::Zero()};
-  Vector3d s_a_fej{Vector3d::Zero()};
-
-  void Enable(bool flag) {
-    enabled = flag;
-    if (!enabled) {
-      initialized = false;
-      use_layer2 = false;
-    }
-  }
-
-  void Initialize(const State &x_nom) {
-    (void)x_nom;
-    if (!enabled) {
-      return;
-    }
-    // InEKF 不需要冻结线性化点，此处仅保留初始化标记。
-    initialized = true;
-  }
-
-  Matrix3d CbnRefAt(const State &x_nom) const {
-    Llh llh = EcefToLlh(x_nom.p);
-    Matrix3d R_ne = RotNedToEcef(llh);
-    return R_ne.transpose() * QuatToRot(x_nom.q);
-  }
-
-  void UpdateLayer2Flag(double omega_rms, double accel_rms,
-                        double omega_threshold, double accel_threshold,
-                        bool layer2_enabled) {
-    (void)omega_rms;
-    (void)accel_rms;
-    (void)omega_threshold;
-    (void)accel_threshold;
-    (void)layer2_enabled;
-    // InEKF 不使用 layer2 FEJ 机制。
-    use_layer2 = false;
-  }
+  void Enable(bool flag) { enabled = flag; }
+  bool IsEnabled() const { return enabled; }
 };
+
+using FejManager = InEkfConfig;
 
 /**
  * 过程与量测噪声参数。
@@ -127,6 +84,23 @@ constexpr int kStateDim = 31;
 // 实际使用的状态维度(不含预留)
 constexpr int kActualStateDim = 31;
 using StateMask = std::array<bool, kStateDim>;
+
+// 31 维状态索引枚举，量测模型、注入与状态掩码优先使用该索引访问。
+struct StateIdx {
+  static constexpr int kPos = 0;          // p (3)
+  static constexpr int kVel = 3;          // v (3)
+  static constexpr int kAtt = 6;          // phi (3)
+  static constexpr int kBa = 9;           // ba (3)
+  static constexpr int kBg = 12;          // bg (3)
+  static constexpr int kSg = 15;          // sg (3)
+  static constexpr int kSa = 18;          // sa (3)
+  static constexpr int kOdoScale = 21;    // odo_scale (1)
+  static constexpr int kMountRoll = 22;   // mounting_roll (1)
+  static constexpr int kMountPitch = 23;  // mounting_pitch (1)
+  static constexpr int kMountYaw = 24;    // mounting_yaw (1)
+  static constexpr int kLever = 25;       // lever_arm (3)
+  static constexpr int kGnssLever = 28;   // gnss_lever_arm (3)
+};
 
 /**
  * 外参/约束相关状态修正保护参数。
@@ -224,7 +198,7 @@ class InsMech {
                                 const NoiseParams &np,
                                 Matrix<double, kStateDim, kStateDim> &Phi,
                                 Matrix<double, kStateDim, kStateDim> &Qd,
-                                bool use_inekf);
+                                const FejManager *fej = nullptr);
 };
 
 /**
