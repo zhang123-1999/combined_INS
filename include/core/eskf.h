@@ -43,10 +43,21 @@ struct State {
  */
 struct InEkfConfig {
   bool enabled = false;
+  bool true_iekf_mode = false;
   Vector3d p_init_ecef = Vector3d::Zero();  // RI 参考原点（Initialize 时设置）
+  // RI GNSS 位置雅可比是否包含 p_ned_local 项。
+  bool ri_gnss_pos_use_p_ned_local = true;
+  // RI 速度-陀螺过程噪声映射模式：
+  // -1: -Skew(v_ned) * C_bn（当前实现默认）
+  //  0: 关闭该项
+  // +1: +Skew(v_ned) * C_bn
+  int ri_vel_gyro_noise_mode = -1;
+  // RI 注入逆变换中，是否对位置执行 dr -= Skew(p_local) * dphi。
+  bool ri_inject_pos_inverse = true;
 
   void Enable(bool flag) { enabled = flag; }
   bool IsEnabled() const { return enabled; }
+  bool UseTrueInEkfMode() const { return enabled && true_iekf_mode; }
 };
 
 using FejManager = InEkfConfig;
@@ -287,6 +298,7 @@ class EskfEngine {
    */
   void UpdateCovarianceJoseph(const MatrixXd &K, const MatrixXd &H,
                               const MatrixXd &R);
+  void ApplyTrueInEkfReset(const VectorXd &dx);
   bool IsStateEnabledByMasks(int idx, const StateMask *update_mask) const;
   void ApplyStateMaskToDx(VectorXd &dx, const StateMask *update_mask) const;
   void ApplyUpdateMaskToKalmanGain(MatrixXd &K, const StateMask *update_mask) const;

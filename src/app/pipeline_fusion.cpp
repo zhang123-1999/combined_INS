@@ -760,7 +760,7 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
     diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R, nullptr);
 
     // 如果存在GNSS速度数据，执行速度更新
-    if (has_vel) {
+    if (has_vel && options.enable_gnss_velocity) {
       Vector3d gnss_vel = dataset.gnss.velocities.row(gnss_idx).transpose();
       Vector3d gnss_vel_std = dataset.gnss.vel_std.row(gnss_idx).transpose();
 
@@ -1137,12 +1137,23 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
 
   FejManager fej;
   fej.Enable(options.fej.enable);
+  fej.true_iekf_mode = options.fej.true_iekf_mode;
+  fej.ri_gnss_pos_use_p_ned_local = options.fej.ri_gnss_pos_use_p_ned_local;
+  fej.ri_vel_gyro_noise_mode = options.fej.ri_vel_gyro_noise_mode;
+  fej.ri_inject_pos_inverse = options.fej.ri_inject_pos_inverse;
   engine.SetFejManager(fej.enabled ? &fej : nullptr);
   engine.Initialize(x0, P0);
   cout << "[Init] InEKF: " << (fej.enabled ? "ON" : "OFF") << "\n";
   if (fej.enabled) {
     cout << "[Init] RI Jacobian sign consistency check skipped "
          << "(new InEKF H is not expected to be opposite-sign to ESKF)\n";
+    cout << "[Init] InEKF mode: "
+         << (fej.true_iekf_mode ? "true_iekf" : "hybrid_ri") << "\n";
+    cout << "[Init] RI toggles: gnss_pos_p_term="
+         << (fej.ri_gnss_pos_use_p_ned_local ? "ON" : "OFF")
+         << " g_vel_gyro_mode=" << fej.ri_vel_gyro_noise_mode
+         << " inject_pos_inverse="
+         << (fej.ri_inject_pos_inverse ? "ON" : "OFF") << "\n";
   }
   cout << "[Init] Ablation: "
        << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")

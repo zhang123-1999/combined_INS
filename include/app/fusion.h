@@ -136,10 +136,17 @@ struct ConstraintConfig {
  */
 struct FejConfig {
   bool enable = false;
+  bool true_iekf_mode = false;
   bool enable_layer2 = true;    // deprecated
   int imu_window_size = 100;    // deprecated
   double omega_threshold = 0.05;  // deprecated
   double accel_threshold = 0.5;   // deprecated
+  // RI GNSS 位置雅可比中是否包含 p_ned_local 项。
+  bool ri_gnss_pos_use_p_ned_local = true;
+  // RI 速度-陀螺噪声映射模式：-1(默认), 0(关闭), +1(正号)。
+  int ri_vel_gyro_noise_mode = -1;
+  // RI 注入逆变换中，位置项 dr -= Skew(p_local)*dphi 是否启用。
+  bool ri_inject_pos_inverse = true;
 };
 
 /**
@@ -248,6 +255,7 @@ struct FusionOptions {
   string imu_path = "IMU.txt";
   string uwb_path = "UWB_simulated.txt";
   string gnss_path = "";       // GNSS数据路径 (可选)
+  bool enable_gnss_velocity = true;
   string pos_path = "POS.txt";
   string output_path = "SOL.txt";
   // 共享配置

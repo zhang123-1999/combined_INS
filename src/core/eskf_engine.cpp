@@ -144,8 +144,15 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
   if (dx_out) {
     *dx_out = dx;
   }
-  InjectErrorState(dx);
-  UpdateCovarianceJoseph(K, H, R);
+  bool use_true_iekf = (fej_ != nullptr && fej_->UseTrueInEkfMode());
+  if (use_true_iekf) {
+    UpdateCovarianceJoseph(K, H, R);
+    InjectErrorState(dx);
+    ApplyTrueInEkfReset(dx);
+  } else {
+    InjectErrorState(dx);
+    UpdateCovarianceJoseph(K, H, R);
+  }
   return true;
 }
 
@@ -223,37 +230,58 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   // 将NED误差转换为ECEF误差
   Llh llh = EcefToLlh(state_.p);
   Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state_.q);
   bool use_inekf = (fej_ != nullptr && fej_->enabled);
-  if (use_inekf) {
+  bool use_true_iekf = (fej_ != nullptr && fej_->UseTrueInEkfMode());
+  if (use_true_iekf) {
+    Vector3d rho_p_body = dr_ned;
+    Vector3d rho_v_body = dv_ned;
+    Vector3d phi_body = dphi_ned;
+
+    dr_ned = C_bn * rho_p_body;
+    dv_ned = C_bn * rho_v_body;
+
+    Vector3d dr_ecef = R_ne * dr_ned;
+    Vector3d dv_ecef = R_ne * dv_ned;
+    state_.p += dr_ecef;
+    state_.v += dv_ecef;
+
+    Vector4d dq = QuatFromSmallAngle(phi_body);
+    state_.q = NormalizeQuat(QuatMultiply(state_.q, dq));
+  } else if (use_inekf) {
     // RI 误差坐标 -> 加法误差坐标：
     // δv = ξ_v - (v^n ×)ξ_φ, δp = ξ_p - (p^n_local ×)ξ_φ
     Vector3d v_ned_nom = R_ne.transpose() * state_.v;
-    Vector3d p_ned_local = R_ne.transpose() * (state_.p - fej_->p_init_ecef);
     dv_ned -= Skew(v_ned_nom) * dphi_ned;
-    dr_ned -= Skew(p_ned_local) * dphi_ned;
+    if (fej_->ri_inject_pos_inverse) {
+      Vector3d p_ned_local = R_ne.transpose() * (state_.p - fej_->p_init_ecef);
+      dr_ned -= Skew(p_ned_local) * dphi_ned;
+    }
   }
 
-  // δr^e = R_n^e * δr^n
-  Vector3d dr_ecef = R_ne * dr_ned;
-  // δv^e = R_n^e * δv^n
-  Vector3d dv_ecef = R_ne * dv_ned;
+  if (!use_true_iekf) {
+    // δr^e = R_n^e * δr^n
+    Vector3d dr_ecef = R_ne * dr_ned;
+    // δv^e = R_n^e * δv^n
+    Vector3d dv_ecef = R_ne * dv_ned;
 
-  // 误差注入（标准ESKF约定：δx = x_true - x̂，x_new = x̂ + δx）
-  state_.p += dr_ecef;
-  state_.v += dv_ecef;
+    // 误差注入（标准ESKF约定：δx = x_true - x̂，x_new = x̂ + δx）
+    state_.p += dr_ecef;
+    state_.v += dv_ecef;
 
-  // InEKF Right-Invariant 姿态注入（左乘）：
-  // q_new = Exp(dphi_ecef) ⊗ q
-  // 标准 ESKF（右乘等效写法）：
-  // q_new = q ⊗ Exp(-dphi_ecef)
-  // 误差状态 φ 在 NED 系定义，先转到 ECEF 后注入。
-  Vector3d dphi_ecef = R_ne * dphi_ned;
-  if (use_inekf) {
-    Vector4d dq = QuatFromSmallAngle(dphi_ecef);
-    state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
-  } else {
-    Vector4d dq = QuatFromSmallAngle(-dphi_ecef);
-    state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
+    // InEKF Right-Invariant 姿态注入（左乘）：
+    // q_new = Exp(dphi_ecef) ⊗ q
+    // 标准 ESKF（右乘等效写法）：
+    // q_new = q ⊗ Exp(-dphi_ecef)
+    // 误差状态 φ 在 NED 系定义，先转到 ECEF 后注入。
+    Vector3d dphi_ecef = R_ne * dphi_ned;
+    if (use_inekf) {
+      Vector4d dq = QuatFromSmallAngle(dphi_ecef);
+      state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
+    } else {
+      Vector4d dq = QuatFromSmallAngle(-dphi_ecef);
+      state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
+    }
   }
 
   // IMU误差反馈（零偏和比例因子误差定义为：b̂ = b + δb）
@@ -304,6 +332,19 @@ void EskfEngine::UpdateCovarianceJoseph(const MatrixXd &K, const MatrixXd &H,
   // Joseph 形式保证协方差对称正定
   Matrix<double, kStateDim, kStateDim> A = I - K * H;
   P_ = A * P_ * A.transpose() + K * R * K.transpose();
+  P_ = 0.5 * (P_ + P_.transpose());
+  ApplyStateMaskToCov();
+}
+
+void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
+  Matrix<double, kStateDim, kStateDim> Gamma =
+      Matrix<double, kStateDim, kStateDim>::Identity();
+  Vector3d phi_body = dx.segment<3>(StateIdx::kAtt);
+  Matrix3d core_reset = QuatToRot(QuatFromSmallAngle(-phi_body));
+  Gamma.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = core_reset;
+  P_ = Gamma * P_ * Gamma.transpose();
   P_ = 0.5 * (P_ + P_.transpose());
   ApplyStateMaskToCov();
 }

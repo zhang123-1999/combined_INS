@@ -7,6 +7,32 @@ using namespace Eigen;
 
 namespace MeasModels {
 
+namespace {
+
+bool UseTrueInEkf(const FejManager *fej) {
+  return fej != nullptr && fej->UseTrueInEkfMode();
+}
+
+bool UseHybridInEkf(const FejManager *fej) {
+  return fej != nullptr && fej->enabled && !fej->true_iekf_mode;
+}
+
+void TransformAdditiveCoreJacobianToTrueInEkf(MatrixXd &H,
+                                              const Matrix3d &C_bn) {
+  if (H.cols() < StateIdx::kAtt + 3) {
+    return;
+  }
+  MatrixXd H_pos = H.block(0, StateIdx::kPos, H.rows(), 3).eval();
+  MatrixXd H_vel = H.block(0, StateIdx::kVel, H.rows(), 3).eval();
+  MatrixXd H_att = H.block(0, StateIdx::kAtt, H.rows(), 3).eval();
+
+  H.block(0, StateIdx::kPos, H.rows(), 3) = H_pos * C_bn;
+  H.block(0, StateIdx::kVel, H.rows(), 3) = H_vel * C_bn;
+  H.block(0, StateIdx::kAtt, H.rows(), 3) = H_att * (-C_bn);
+}
+
+}  // namespace
+
 // === InEKF / Right-Invariant 误差约定说明 ===
 // 误差定义：η = X_tilde * X^{-1}（右不变误差）。
 // 姿态注入见 EskfEngine::InjectErrorState：
@@ -78,6 +104,8 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
                                    double sigma_nhc_y, double sigma_nhc_z,
                                    const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
+  bool use_true_iekf = UseTrueInEkf(fej);
+  bool use_hybrid_inekf = UseHybridInEkf(fej);
   VelConstraintModel model;
 
   Llh llh = EcefToLlh(state.p);
@@ -109,7 +137,7 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   Matrix3d H_v = C_b_v * C_bn.transpose();
 
   Matrix3d H_theta = Matrix3d::Zero();
-  if (use_inekf) {
+  if (use_hybrid_inekf) {
     // RI 坐标下速度类约束与姿态误差解耦
     H_theta.setZero();
   } else {
@@ -149,10 +177,14 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   // δ(C_n^b * omega_in^n) / δφ ≈ C_n^b * Skew(omega_in^n) 的贡献经杆臂传播
   // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
   // 注：仅当 lever_arm.norm() > 0.05m 时该项才有显著影响
-  if (!use_inekf && lever_arm.norm() > 1e-3) {
+  if (!use_hybrid_inekf && lever_arm.norm() > 1e-3) {
     Matrix3d H_theta_lever =
         -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
     model.H.block<2, 3>(0, StateIdx::kAtt) += H_theta_lever.block<2, 3>(1, 0);
+  }
+
+  if (use_true_iekf) {
+    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
   }
 
   model.R = Matrix2d::Zero();
@@ -171,6 +203,8 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
                                    double sigma_odo,
                                    const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
+  bool use_true_iekf = UseTrueInEkf(fej);
+  bool use_hybrid_inekf = UseHybridInEkf(fej);
   VelConstraintModel model;
 
   Llh llh = EcefToLlh(state.p);
@@ -207,7 +241,7 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   model.H.block<1, 3>(0, StateIdx::kVel) = s * H_v_phys;
 
   Matrix3d H_theta_full = Matrix3d::Zero();
-  if (use_inekf) {
+  if (use_hybrid_inekf) {
     // RI 坐标下，速度类约束的姿态列解耦
     H_theta_full.setZero();
   } else {
@@ -246,6 +280,10 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   model.R.resize(1, 1);
   model.R(0, 0) = sigma_odo * sigma_odo;
 
+  if (use_true_iekf) {
+    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
+  }
+
   return model;
 }
 
@@ -257,11 +295,28 @@ UwbModel ComputeGnssPositionModel(const State &state, const Vector3d &z_ecef,
                                   const Vector3d &sigma_gnss,
                                   const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
+  bool use_true_iekf = UseTrueInEkf(fej);
   UwbModel model;
 
   Llh llh = EcefToLlh(state.p);
   Matrix3d R_ne = RotNedToEcef(llh);
   Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+
+  if (use_true_iekf) {
+    Vector3d d_ecef = z_ecef - state.p;
+    Vector3d d_ned = R_ne.transpose() * d_ecef;
+    Vector3d d_body = C_bn.transpose() * d_ned;
+
+    model.y = d_body - state.gnss_lever_arm;
+    model.H.setZero(3, kStateDim);
+    model.H.block<3, 3>(0, StateIdx::kPos) = Matrix3d::Identity();
+    model.H.block<3, 3>(0, StateIdx::kAtt) = -Skew(state.gnss_lever_arm);
+    model.H.block<3, 3>(0, StateIdx::kGnssLever) = Matrix3d::Identity();
+
+    Matrix3d R_ecef = (sigma_gnss.cwiseProduct(sigma_gnss)).asDiagonal();
+    model.R = C_bn.transpose() * R_ne.transpose() * R_ecef * R_ne * C_bn;
+    return model;
+  }
 
   Vector3d lever_ned = C_bn * state.gnss_lever_arm;
   Vector3d p_pred_ecef = state.p + R_ne * lever_ned;
@@ -275,10 +330,15 @@ UwbModel ComputeGnssPositionModel(const State &state, const Vector3d &z_ecef,
   model.H.setZero(3, kStateDim);
   model.H.block<3, 3>(0, StateIdx::kPos) = Matrix3d::Identity();
   if (use_inekf) {
-    // RI 坐标: H_phi = -(Skew(p_ned_local) + Skew(lever_ned))
-    Vector3d p_ned_local = R_ne.transpose() * (state.p - fej->p_init_ecef);
-    model.H.block<3, 3>(0, StateIdx::kAtt) =
-        -(Skew(p_ned_local) + Skew(lever_ned));
+    if (fej->ri_gnss_pos_use_p_ned_local) {
+      // RI 坐标: H_phi = -(Skew(p_ned_local) + Skew(lever_ned))
+      Vector3d p_ned_local = R_ne.transpose() * (state.p - fej->p_init_ecef);
+      model.H.block<3, 3>(0, StateIdx::kAtt) =
+          -(Skew(p_ned_local) + Skew(lever_ned));
+    } else {
+      // A/B 开关：退化为仅杠杆臂耦合。
+      model.H.block<3, 3>(0, StateIdx::kAtt) = -Skew(lever_ned);
+    }
   } else {
     // 标准 ESKF
     model.H.block<3, 3>(0, StateIdx::kAtt) = Skew(lever_ned);
@@ -299,6 +359,8 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
                                   const Vector3d &sigma_gnss_vel,
                                   const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
+  bool use_true_iekf = UseTrueInEkf(fej);
+  bool use_hybrid_inekf = UseHybridInEkf(fej);
   UwbModel model;
 
   Llh llh = EcefToLlh(state.p);
@@ -334,7 +396,7 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
   Vector3d Cb_l_cross_omega_H = C_bn * Skew(state.gnss_lever_arm) * omega_ib_corr;
   Matrix3d H_phi_2 = -Skew(Cb_l_cross_omega_H);
   Matrix3d H_phi = H_phi_1 + H_phi_2;
-  if (use_inekf) {
+  if (use_hybrid_inekf) {
     model.H.block<3, 3>(0, StateIdx::kAtt) = -H_phi - Skew(v_ned);
   } else {
     model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
@@ -350,6 +412,10 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
 
   // H_gnss_lever = C_b^n * Skew(ω_nb^b)
   model.H.block<3, 3>(0, StateIdx::kGnssLever) = C_bn * Skew(omega_nb_b);
+
+  if (use_true_iekf) {
+    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
+  }
 
   model.R = sigma_gnss_vel.cwiseProduct(sigma_gnss_vel).asDiagonal();
 

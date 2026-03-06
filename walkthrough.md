@@ -1,8 +1,8 @@
-﻿# walkthrough.md
+# walkthrough.md
 
 Schema: `v1`
 文档语言: 中文（必要技术字段保留英文）
-Last updated: `2026-03-04`
+Last updated: `2026-03-06`
 
 ## 项目快照
 
@@ -13,19 +13,30 @@ Last updated: `2026-03-04`
 
 ### 当前基线与代码事实
 
-- 基线配置: `config_data2_baseline_eskf.yaml`
 - 状态维度: `kStateDim = 31`
 - 主要滤波模式:
   - 标准 ESKF（`fusion.fej.enable: false`）
   - InEKF 开关模式（`fusion.fej.enable: true`）
-- 当前 data2 基线的核心组合:
-  - INS + GNSS + ODO + NHC（UWB 在基线配置中关闭）
+- ESKF 基线配置: `config_data2_baseline_eskf.yaml`
+- InEKF 历史对照配置（保留复现实验）: `config_data2_baseline_inekf_ctrl.yaml`, `config_data2_gnss30_inekf.yaml`
+- InEKF 新基线配置（当前推荐）:
+  - `config_data2_baseline_inekf_best.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+  - 固定开关: `ri_gnss_pos_use_p_ned_local=true`, `ri_vel_gyro_noise_mode=1`, `ri_inject_pos_inverse=true`
+- data4 主口径与配置:
+  - GNSS 主口径: `dataset/data4_converted/GNSS_converted.txt`（13 列，含速度）
+  - data4 4 组主配置: `config_data4_baseline_eskf.yaml`, `config_data4_baseline_inekf_best.yaml`,
+    `config_data4_gnss30_eskf.yaml`, `config_data4_gnss30_inekf_best.yaml`
+  - data4 InEKF 最优开关（来自 `EXP-20260305-data4-inekf-switchscan-r1`）:
+    `p_local=OFF, g=+1, inject=OFF`
+- 当前 data2 基线组合: INS + GNSS + ODO + NHC（UWB 关闭）
+- 当前 data4 基线组合: INS + GNSS + ODO + NHC（UWB 关闭）
 
 ### 31维状态拆分备忘
 
 - `p(3), v(3), att(3), ba(3), bg(3), sg(3), sa(3), odo_scale(1), mounting(3), lever_odo(3), lever_gnss(3)`
 
-### 融合主流程顺序（对应代码实现）
+### 融合主流程顺序（代码一致）
 
 1. IMU 预测
 2. ZUPT
@@ -33,923 +44,887 @@ Last updated: `2026-03-04`
 4. NHC
 5. ODO
 6. UWB
-7. GNSS（含时间调度关断与可选 post-GNSS 消融）
-8. 状态诊断与结果记录
+7. GNSS（含 schedule 与 post-GNSS ablation）
+8. 诊断与结果记录
 
 ## 实验索引（Experiment Registry）
 
 | exp_id | 日期 | 目的 | 配置 | 关键产物 | 关键指标 | 状态 | 新鲜度 |
 |---|---|---|---|---|---|---|---|
-| EXP-20260304-data2-baseline-eskf | 2026-03-04 | data2 标准 ESKF 基线 | `config_data2_baseline_eskf.yaml` | `SOL_data2_baseline_eskf.txt`, `output/logs_runcheck_baseline_eskf.log`, `output/result_data2_baseline_eskf/` | 日志 RMSE xyz: `0.763749 0.566040 0.770121` | 当前参考 | pass（日志与产物时间一致） |
-| EXP-20260304-data2-baseline-inekf-ctrl | 2026-03-04 | data2 InEKF 开关基线 | `config_data2_baseline_inekf_ctrl.yaml` | `SOL_data2_baseline_inekf_ctrl.txt`, `output/logs_runcheck_baseline_inekf_ctrl.log`, `output/result_data2_baseline_inekf_ctrl/` | 日志 RMSE xyz: `0.763 0.566 0.769` | 当前参考 | pass（日志与产物时间一致） |
-| EXP-20260304-data2-gnss30-postfix-gnsslever-eskf | 2026-03-04 | GNSS 前30%启用，后段进行 post-GNSS 状态冻结 | `config_data2_gnss30_postfix_gnsslever_eskf.yaml` | `SOL_data2_gnss30_postfix_gnsslever_eskf.txt`, `output/logs_runcheck_gnss30_postfix_gnsslever_eskf.log`, `output/result_data2_gnss30_postfix_gnsslever_eskf/` | 日志 RMSE xyz: `58.292 84.777 78.863` | 当前参考 | pass（日志与产物时间一致） |
-| EXP-20260304-data2-gnss30-inekf | 2026-03-04 | InEKF 对比实验：GNSS 仅前30%启用，后段 INS/ODO/NHC | `config_data2_gnss30_inekf.yaml` | `SOL_data2_gnss30_inekf.txt`, `output/logs_runcheck_gnss30_inekf.log`, `output/result_data230_inekf/`, `output/compare_data2_gnss30_eskf_postfix_vs_inekf/` | 历史日志 RMSE xyz: `92.918 104.149 149.448`；对比 RMSE 3D: `204.488` | stale_or_conflict | conflict（被 `EXP-20260304-inekf-refactor-minrisk-debug` 同配置新日志覆盖） |
-| EXP-20260304-data2-gnss30-eskf-nofreeze | 2026-03-04 | ESKF 对比实验：GNSS 仅前30%启用，后段不做 GNSS 杆臂冻结，状态照常更新 | `config_data2_gnss30_eskf_nofreeze.yaml` | `SOL_data2_gnss30_eskf_nofreeze.txt`, `output/logs_runcheck_gnss30_eskf_nofreeze.log`, `output/result_data230_eskf_nofreeze/`, `output/compare_data2_gnss30_eskf_postfix_vs_nofreeze/` | 历史日志 RMSE xyz: `58.292 84.777 78.863`；对比 RMSE 3D: `129.632` | stale_or_conflict | conflict（被 `EXP-20260304-inekf-refactor-minrisk-debug` 同配置新日志覆盖） |
-| EXP-20260304-preexp-fix-regression | 2026-03-04 | 修复审查问题并执行门禁回归 | `config_data2_baseline_eskf.yaml`; `config_data2_baseline_inekf_ctrl.yaml`; `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`; `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`; `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml` | `output/review/20260304-1855-fix_implementation/` | baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`; baseline InEKF RMSE xyz: `0.763 0.565 0.769`; missing_truth_manual_init `EXIT_CODE=0`; invalid_gnss `EXIT_CODE=1`; maxdt_zero `EXIT_CODE=0` | 修复验证完成 | pass（构建与回归日志时间链一致） |
-| EXP-20260304-inekf-refactor-minrisk-debug | 2026-03-04 | 按“代码大修”执行最小风险重构调试：FEJ 时序、H 线性化、过程模型签名一致性与回归验证 | `config_data2_baseline_eskf.yaml`; `config_data2_baseline_inekf_ctrl.yaml`; `config_data2_gnss30_inekf.yaml`; `config_data2_gnss30_eskf_nofreeze.yaml` | `output/review/20260304-2016-code_overhaul_debug/baseline_eskf_final.log`; `output/review/20260304-2016-code_overhaul_debug/baseline_inekf_after_gnss_lever_guard.log`; `output/review/20260304-2016-code_overhaul_debug/gnss30_inekf_final.log`; `output/review/20260304-2016-code_overhaul_debug/gnss30_eskf_nofreeze_final.log` | baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`; baseline InEKF RMSE xyz: `0.763260 0.565492 0.769397`; GNSS30 InEKF RMSE xyz: `49.895 72.609 102.467`; GNSS30 ESKF RMSE xyz: `57.533 82.961 78.063` | stale_or_conflict | conflict（该轮 InEKF 实现依赖 FEJ 冻结语义，已被 `EXP-20260304-inekf-rewrite-no-fej` 按 `代码大修2.md` 覆盖） |
-| EXP-20260304-inekf-rewrite-no-fej | 2026-03-04 | 按 `代码大修2.md` 重写 InEKF：去除 FEJ 冻结依赖，仅保留 InEKF 开关；回归 4 组配置并按“绝对误差优先”评估 | `config_data2_baseline_eskf.yaml`; `config_data2_baseline_inekf_ctrl.yaml`; `config_data2_gnss30_inekf.yaml`; `config_data2_gnss30_eskf_nofreeze.yaml` | `output/review/20260304-2104-inekf-rewrite/baseline_eskf_final.log`; `output/review/20260304-2104-inekf-rewrite/baseline_inekf_ctrl_final.log`; `output/review/20260304-2104-inekf-rewrite/gnss30_inekf_final.log`; `output/review/20260304-2104-inekf-rewrite/gnss30_eskf_nofreeze_final.log` | baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`; baseline InEKF RMSE xyz: `0.763144 0.565423 0.769264`; GNSS30 InEKF RMSE xyz: `89.206 100.587 142.126`; GNSS30 ESKF RMSE xyz: `57.533 82.961 78.063` | stale_or_conflict | conflict（被 `EXP-20260304-inekf-ri-realization-codeoverhaul3` 覆盖） |
-| EXP-20260304-inekf-ri-realization-codeoverhaul3 | 2026-03-04 | 按 `代码大修3.md` 实现 Right-Invariant InEKF（RI 注入逆变换 + 过程模型重写 + 量测模型 RI 雅可比）并回归 4 组配置 | `config_data2_baseline_eskf.yaml`; `config_data2_baseline_inekf_ctrl.yaml`; `config_data2_gnss30_inekf.yaml`; `config_data2_gnss30_eskf_nofreeze.yaml` | `output/review/20260304-2312-inekf-ri-implementation/baseline_eskf.log`; `output/review/20260304-2312-inekf-ri-implementation/baseline_inekf_ctrl.log`; `output/review/20260304-2312-inekf-ri-implementation/gnss30_inekf.log`; `output/review/20260304-2312-inekf-ri-implementation/gnss30_eskf_nofreeze.log` | baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`; baseline InEKF RMSE xyz: `0.953258 0.962653 1.014938`; GNSS30 InEKF RMSE xyz: `40.557 89.686 66.555` (RMSE3D `118.819`); GNSS30 ESKF RMSE xyz: `57.533 82.961 78.063` (RMSE3D `127.618`) | 当前参考（RI InEKF 实现） | pass（编译成功，4 组日志时间链一致；并记录 baseline InEKF 新回归风险） |
-| EXP-20260304-inekf-ri-gvelgyro-fix | 2026-03-04 | 按 `ISSUE-005` 假设在 InEKF 过程噪声映射中补充 `G(kVel,gyro)` RI 耦合项并回归 4 组配置 | `config_data2_baseline_eskf.yaml`; `config_data2_baseline_inekf_ctrl.yaml`; `config_data2_gnss30_inekf.yaml`; `config_data2_gnss30_eskf_nofreeze.yaml` | `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_eskf.log`; `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_inekf_ctrl.log`; `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_inekf.log`; `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_eskf_nofreeze.log` | baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`; baseline InEKF RMSE xyz: `1.044499 1.277957 1.263830` (RMSE3D `2.078802`); GNSS30 InEKF RMSE xyz: `47.471 96.176 126.611` (RMSE3D `165.933`); GNSS30 ESKF RMSE xyz: `57.533 82.961 78.063` (RMSE3D `127.618`) | 当前代码快照（待调试） | pass（编译成功，4 组日志时间链一致；结果与“仅补 G_vel,gyro 可修复”假设冲突） |
+| EXP-20260304-data2-baseline-eskf | 2026-03-04 | data2 标准 ESKF 基线 | `config_data2_baseline_eskf.yaml` | `SOL_data2_baseline_eskf.txt`; `output/logs_runcheck_baseline_eskf.log` | RMSE xyz `0.763591 0.565924 0.770052` | 参考基线 | pass |
+| EXP-20260304-data2-baseline-inekf-ctrl | 2026-03-04 | data2 旧 InEKF 对照基线 | `config_data2_baseline_inekf_ctrl.yaml` | `SOL_data2_baseline_inekf_ctrl.txt`; `output/logs_runcheck_baseline_inekf_ctrl.log` | RMSE xyz `0.763 0.566 0.769`（旧） | 历史对照 | stale_or_conflict |
+| EXP-20260304-inekf-ri-realization-codeoverhaul3 | 2026-03-04 | RI InEKF 初版完整落地 | 4组配置（baseline/GNSS30 × ESKF/InEKF） | `output/review/20260304-2312-inekf-ri-implementation/*.log` | baseline InEKF RMSE3D `1.692779`; GNSS30 InEKF RMSE3D `118.819261` | 历史关键节点 | pass |
+| EXP-20260304-inekf-ri-gvelgyro-fix | 2026-03-04 | 在 RI 中加入 `G(kVel,gyro)=-Skew(v)C_bn` | 同上 | `output/review/20260304-2318-inekf-ri-gvelgyro-fix/*.log` | baseline InEKF RMSE3D `2.078802`; GNSS30 InEKF RMSE3D `165.932710` | 历史关键节点 | pass |
+| EXP-20260305-inekf-ab-seq-r1 | 2026-03-05 | 按顺序 A/B：`p_ned_local`→`G(kVel,gyro)`→注入逆变换 | `output/review/20260305-inekf-ab-seq-r1-inekf-ab-sequence/cfg_*.yaml` | `ab_metrics.csv`; `summary.md`; `*.log` | 最优分支: `p_ned_local=ON, g=+1, inject=ON` | 当前定位依据 | pass |
+| EXP-20260305-inekf-best4-regression-r1 | 2026-03-05 | 在最优分支执行 4 组标准回归并绘图 | `output/review/20260305-inekf-best4-reg-r1/cfg_*.yaml` | `metrics_summary.csv`; `run_summary.md`; `plots/`; `compare_*` | baseline RMSE3D ESKF/InEKF `1.223242/1.723701`; GNSS30 `127.618202/88.890702` | InEKF 新基线验证 | pass |
+| EXP-20260305-inekf-fghi-sign-audit-r1 | 2026-03-05 | 做 `F/G/H/Inject` 全链路符号一致性审查 | N/A（代码审查） | `output/review/20260305-inekf-fghi-sign-audit-r1/inekf_fghi_sign_audit.md` | 形成 `g=+1` 与 `H/Inject` 成对项的一致性证据链 | 理论闭环审查 | pass |
+| EXP-20260306-inekf-tex-code-audit-r1 | 2026-03-06 | 逐条核对 InEKF 源码实现与 `可观性分析讨论与InEKF算法.tex` 推导是否一致 | N/A（代码/文档审查） | `output/review/20260306-inekf-tex-code-audit-r1/inekf_tex_code_audit.md` | 9项检查：exact `1`，partial `3`，mismatch/undocumented `5` | 理论-实现一致性审查 | pass |
+| EXP-20260306-true-iekf-refactor-r1 | 2026-03-06 | 按“代码贴理论”主线新增 `true_iekf` 分支，并与现有 hybrid RI 实现做 fresh 对比 | `config_data2_baseline_true_iekf.yaml`; `config_data2_gnss30_true_iekf.yaml`; `config_data4_baseline_true_iekf.yaml`; `config_data4_gnss30_true_iekf.yaml` | `output/review/20260306-true-iekf-refactor-r1/{metrics_summary.csv,metrics_summary.json,summary.md,*.log}`; `.research/20260306-true-iekf-refactor-r1/polished_report.md` | data2 baseline RMSE3D `1.723701→1.228326`; data2 GNSS30 `88.890702→201.158876`; data4 baseline `0.876828→0.913143`; data4 GNSS30 `73.715425→115.499686`; data2 `H_att_max 2354→2.31` | 结构改造已落地，性能结论 mixed | pass |
+| EXP-20260306-true-iekf-ablation-r1 | 2026-03-06 | 在 `true_iekf` GNSS30 场景下做 `GNSS_VEL / ODO / NHC` 消融矩阵，定位 sparse-GNSS 退化主因 | `output/review/20260306-true-iekf-ablation-r1/cfg_*.yaml` | `output/review/20260306-true-iekf-ablation-r1/{ablation_metrics.csv,ablation_summary.json,summary.md,cfg_*.log}` | data2: `no_gnss_vel` 无变化，`no_odo/no_nhc` 显著恶化；data4 同趋势 | sparse-GNSS 根因定位 | pass |
+| EXP-20260305-inekf-doubleoff-interaction-r1 | 2026-03-05 | 交互实验：`p_ned_local=OFF` + `inject_pos_inverse=OFF`（`g=+1`） | `output/review/20260305-inekf-doubleoff-interaction-r1/cfg_doubleoff_*.yaml` | `doubleoff_metrics.csv`; `summary.md`; `doubleoff_*.log`; `SOL_doubleoff_*.txt` | RMSE3D baseline/GNSS30 `615824.703508/304357.873776`（显著发散） | 交互项排错证据 | pass |
+| EXP-20260305-issue001-baseline-compare-r1 | 2026-03-05 | 用 InEKF best 口径重生 baseline 对比目录并统一指标 | `output/review/20260305-issue001-baseline-compare-r1/cfg_*.yaml` | `output/compare_data2_baseline_eskf_vs_inekf_ctrl/{metrics.csv,summary.txt,summary.json,*.png}`; `output/review/20260305-issue001-baseline-compare-r1/*.log` | RMSE3D ESKF/InEKF_best `1.223243/1.723701`（与本轮日志一致） | ISSUE-001 处置证据 | pass |
+| EXP-20260305-postgnss-freeze-matrix-r1 | 2026-03-05 | 在 InEKF best 分支执行 post-GNSS 冻结矩阵（`odo_scale/mounting/lever_all`） | `output/review/20260305-postgnss-freeze-matrix-r1/cfg_*.yaml` | `freeze_matrix_metrics.csv`; `summary.md`; `s*.log`; `SOL_s*.txt` | 最优 `s1m1l0` RMSE3D `61.048358`；参考 `s0m0l0` 为 `88.890702` | 可观性证据补齐 | pass |
+| EXP-20260305-baseline-gmode-sensitivity-r1 | 2026-03-05 | baseline 下定位 `g=0` vs `g=+1` 时段敏感性差异 | `output/review/20260305-baseline-gmode-sensitivity-r1/cfg_gmode_{0,1}.yaml` | `gmode_sensitivity_metrics.csv`; `summary.md`; `gmode_{0,1}.log`; `SOL_gmode_{0,1}.txt` | RMSE3D `g0/g1=1.692779/1.723701`；head/tail 呈互补差异 | HYP-1 细化证据 | pass |
+| EXP-20260305-postgnss-headratio-robustness-r1 | 2026-03-05 | 复验 post-GNSS 冻结策略在不同 `head_ratio` 的稳健性 | `output/review/20260305-postgnss-headratio-robustness-r1/cfg_r*_*.yaml` | `headratio_robustness_metrics.csv`; `summary.md`; `r*_*.log`; `SOL_r*_*.txt` | `freeze(scale+mounting)` 在 `0.2/0.3/0.4/0.5` 全部优于 ref（delta `-48.72~-11.80`） | HYP-3 稳健性证据 | pass |
+| EXP-20260305-baseline-gmode-gnssvel-mechanism-r1 | 2026-03-05 | 验证 baseline `g=0/1` 差异是否来自 GNSS速度更新 | `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/cfg_g*_vel*.yaml` | `gnssvel_mechanism_metrics.csv`; `summary.md`; `g*_vel*.log`; `SOL_g*_vel*.txt` | `vel_on/off` 下结果完全一致：`g0/g1=1.692779/1.723701` | HYP-1 机制排除证据 | pass |
+| EXP-20260305-baseline-gmode-gnsspos-coupling-r1 | 2026-03-05 | 深挖 `GNSS_POS` 相关项在 `g=0/1` 下的时段作用机制，并定义 `ISSUE-005/006` 关闭门槛。 | `output/review/20260305-baseline-gmode-gnsspos-coupling-r1/cfg_p{on,off}_g{0,1}.yaml` | `gnsspos_coupling_metrics.csv`; `timeline_windows_pon_g1_minus_g0.csv`; `summary.md`; `p*_g*.log`; `SOL_p*_g*.txt` | p_local=on: g0/g1 RMSE3D `1.692779/1.723701`; p_local=off: `4.1177455e7/1.0528657e6` | HYP-1 ?????? | pass |
+| EXP-20260305-state21-30-drift-r1 | 2026-03-05 | 输出状态块 `21-30` 的 post-GNSS 时序漂移并对齐冻结结论 | `output/review/20260305-postgnss-freeze-matrix-r1/SOL_s*.txt`（分析输入） | `output/review/20260305-state21_30-drift-r1/{state21_30_postgnss_drift.csv,summary.md,*.png}` | `mounting` 冻结分支的 `mounting_pitch/yaw` 漂移约为 0，且对应更低 RMSE3D | 状态块时序证据 | pass |
+| EXP-20260305-data2-gnsspos-mechanism-r2 | 2026-03-05 | data2 GNSS_POS 机制补全 | `config_data2_baseline_inekf_best.yaml`（派生 g0/g1 × p_on/off） | `output/review/EXP-20260305-data2-gnsspos-mechanism-r2/{gnsspos_mechanism_metrics.csv,h_att_timeline.csv,summary.md}` | p_on g0/g1 RMSE3D `1.692779/1.723701`; p_off g0/g1 `4.12e7/1.05e6`; corr `-0.091572` | 机制补证 | pass |
+| EXP-20260305-data2-mountroll-observability-r1 | 2026-03-05 | mounting_roll 可观性补证 | `config_data2_gnss30_inekf_best.yaml`（冻结矩阵对照） | `output/review/EXP-20260305-data2-mountroll-observability-r1/{mountroll_observability_metrics.csv,std_mr_cmp.png,summary.md}` | `s1m1l0` post std_mr=0; RMSE3D `61.048699` vs ref `88.890428` | 状态块补证 | pass |
+| EXP-20260305-data2-process-noise-regression-r1 | 2026-03-05 | RI 过程噪声映射回归 | `config_data2_baseline_inekf_best.yaml`, `config_data2_gnss30_inekf_best.yaml` | `output/review/EXP-20260305-data2-process-noise-regression-r1/process_noise_mode_regression.csv` | baseline g0 best `1.692779`; gnss30 g1 best `88.890428` | 回归证据 | pass |
+| EXP-20260305-data2-postgnss-freeze-matrix-r2 | 2026-03-05 | post-GNSS 冻结矩阵重跑 | `config_data2_gnss30_inekf_best.yaml` | `output/review/EXP-20260305-data2-postgnss-freeze-matrix-r2/freeze_matrix_metrics.csv` | best `s1m1l0` RMSE3D `61.048699` (delta `-27.841730`) | 可观性证据补齐 | pass |
+| EXP-20260305-data4-inekf-switchscan-r1 | 2026-03-05 | data4 InEKF 开关短扫 | `config_data4_baseline_inekf_best.yaml` | `output/review/EXP-20260305-data4-inekf-switchscan-r1/switch_scan_metrics.csv` | best `p0_g1_i0` RMSE3D `0.876829` | data4 最优开关 | pass |
+| EXP-20260305-data4-main4-regression-r1 | 2026-03-05 | data4 baseline/GNSS30 × ESKF/InEKF | data4 4 组配置 | `output/review/EXP-20260305-data4-main4-regression-r1/{metrics_summary.csv,plots/}` | RMSE3D baseline ESKF/InEKF `0.929070/0.876829`; GNSS30 `51.371318/73.714930` | data4 主回归 | pass |
+| EXP-20260305-data4-gnss30-freeze-matrix-r1 | 2026-03-05 | data4 GNSS30 冻结矩阵 | `config_data4_gnss30_inekf_best.yaml` | `output/review/EXP-20260305-data4-gnss30-freeze-matrix-r1/freeze_matrix_metrics.csv` | best `s0m1l1` RMSE3D `66.752679` (delta `-6.962252`) | data4 冻结证据 | pass |
+| EXP-20260305-data4-gnssvel-sensitivity-r1 | 2026-03-05 | data4 GNSS 速度噪声敏感性 | data4 baseline/gnss30 InEKF | `output/review/EXP-20260305-data4-gnssvel-sensitivity-r1/sensitivity_metrics.csv` | baseline `0.876829` vs `5.178337`; gnss30 `73.714930` vs `26.479406` | 风险提示 | pass |
+| EXP-20260305-data2-main4-docsync-r1 | 2026-03-05 | data2 4 组 doc 口径回归 | data2 4 组配置 | `output/review/EXP-20260305-data2-main4-docsync-r1/metrics_summary.csv` | RMSE3D baseline ESKF/InEKF `1.223243/1.723701`; GNSS30 `127.618348/88.890428` | 文档口径 | pass |
+
+### 历史实验压缩索引（保留 ID 可追溯）
+
+- `EXP-20260304-data2-gnss30-postfix-gnsslever-eskf`
+- `EXP-20260304-data2-gnss30-inekf`
+- `EXP-20260304-data2-gnss30-eskf-nofreeze`
+- `EXP-20260304-preexp-fix-regression`
+- `EXP-20260304-inekf-refactor-minrisk-debug`
+- `EXP-20260304-inekf-rewrite-no-fej`
+- `EXP-20260304-inekf-ri-fgqd-audit-r2`
+- `EXP-20260305-inekf-deep-research-audit-r1`
 
 ## 已知不一致项（Known Inconsistencies）
 
 | issue_id | 发现日期 | 描述 | 影响文件 | 影响 | 处理状态 |
 |---|---|---|---|---|---|
-| ISSUE-001-metric-conflict-baseline-inekf | 2026-03-04 | `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.txt` 中 InEKF 基线指标与同日 runcheck 日志不一致。 | `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.txt`, `output/compare_data2_baseline_eskf_vs_inekf_ctrl/metrics.csv`, `output/logs_runcheck_baseline_inekf_ctrl.log` | 可能导致算法对比结论被陈旧结果污染。 | open |
-| ISSUE-005-baseline-inekf-ri-regression | 2026-03-04 | RI 实现后 baseline InEKF 与 ESKF 存在显著偏离，且补 `G(kVel,gyro)` 后进一步扩大（`1.044/1.278/1.264` vs `0.764/0.566/0.770`）。 | `src/core/eskf_engine.cpp`, `src/core/ins_mech.cpp`, `src/core/measurement_models_uwb.cpp`, `output/review/20260304-2312-inekf-ri-implementation/baseline_inekf_ctrl.log`, `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_inekf_ctrl.log` | 影响基线稳定性与可解释性，说明当前 RI 过程/量测噪声映射仍存在不一致。 | open |
-| ISSUE-006-ri-process-noise-mapping-incomplete | 2026-03-04 | 当前仅补 `G(kVel,gyro)` 后，GNSS30 InEKF 从 RMSE3D `118.819` 恶化到 `165.933`，提示 RI 坐标过程噪声映射可能需成体系修正（例如与 `ξ_p` 或姿态噪声约定联动）。 | `src/core/ins_mech.cpp`, `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_inekf.log` | 可能导致 InEKF 协方差传播与量测线性化不自洽。 | open |
-| ISSUE-004-inekf-fej-semantic-conflict | 2026-03-04 | `EXP-20260304-inekf-refactor-minrisk-debug` 的 InEKF 路径依赖 FEJ 冻结语义，与 `代码大修2.md` 的“无 FEJ InEKF”要求冲突。 | `include/core/eskf.h`, `src/core/ins_mech.cpp`, `src/core/measurement_models_uwb.cpp`, `src/app/pipeline_fusion.cpp`, `output/review/20260304-2016-code_overhaul_debug/*` | 旧实验中 InEKF 指标（尤其 GNSS30）不可直接作为“无 FEJ InEKF”结论。 | resolved（2026-03-04，见 `EXP-20260304-inekf-rewrite-no-fej`） |
-| ISSUE-002-manual-init-missing-truth-crash | 2026-03-04 | 手动初始化且真值文件缺失时，程序在评估阶段崩溃（access violation）。 | `src/app/evaluation.cpp`, `src/utils/math_utils.cpp`, `output/review/20260304-1855-fix_implementation/missing_truth_manual_init.log` | 已改为受控退化：真值缺失时跳过 RMSE 并继续输出结果。 | resolved（2026-03-04，回归通过） |
-| ISSUE-003-gnss-load-nonfatal | 2026-03-04 | GNSS 文件列数不足时，程序仅打印错误但仍返回成功并输出结果。 | `src/app/pipeline_fusion.cpp`, `output/review/20260304-1855-fix_implementation/invalid_gnss_clean.log`, `output/review/20260304-1855-fix_implementation/invalid_gnss_clean.exit.txt` | 已改为 fail-fast：GNSS 数据非法时直接非零退出。 | resolved（2026-03-04，回归通过） |
+| ISSUE-001-metric-conflict-baseline-inekf | 2026-03-04 | 历史 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/` 指标口径曾与 runcheck 冲突；已在 2026-03-05 用 InEKF best 口径重生。 | `output/compare_data2_baseline_eskf_vs_inekf_ctrl/*` | 历史结论需以重生产物为准。 | downgraded |
+| ISSUE-005-baseline-inekf-ri-regression | 2026-03-04 | baseline InEKF 相对 ESKF 的差异已被机制实验约束：`p_local=on` 差异小；`p_local=off` 出现灾难性发散；与 `GNSS_VEL` 无关。 | `output/review/EXP-20260305-data2-gnsspos-mechanism-r2/*` | 影响解释闭环。 | closed_evidence |
+| ISSUE-006-ri-process-noise-mapping-incomplete | 2026-03-04 | RI 过程噪声映射一致性已完成回归：baseline g0 最优，gnss30 g1 最优，无自相矛盾证据。 | `output/review/EXP-20260305-data2-process-noise-regression-r1/*` | 解释 GNSS30 与 baseline 差异。 | closed_evidence |
+| ISSUE-007-inekf-tex-code-gap | 2026-03-06 | 代码-理论差距已部分收敛：新增 `true_iekf_mode` 后，Lie 核心 `F/GNSS_POS/Inject/reset` 已更接近 `可观性分析讨论与InEKF算法.tex`，但 ODO/NHC、GNSS_VEL 与 `21-30` 欧氏扩展块仍是 hybrid 实现，无法宣称“全31维完全无泄露”。 | `算法文档/可观性分析讨论与InEKF算法.tex`; `include/core/eskf.h`; `src/core/ins_mech.cpp`; `src/core/measurement_models_uwb.cpp`; `src/core/eskf_engine.cpp`; `output/review/20260306-true-iekf-refactor-r1/summary.md` | 影响 true-IEKF 的最终口径与 sparse-GNSS 性能。 | partially_resolved |
+
+### 已解决项（压缩）
+
+- `ISSUE-002-manual-init-missing-truth-crash`：resolved（2026-03-04）
+- `ISSUE-003-gnss-load-nonfatal`：resolved（2026-03-04）
+- `ISSUE-004-inekf-fej-semantic-conflict`：resolved（2026-03-04）
 
 ## 开放假设（Open Hypotheses）
 
 | hyp_id | 假设 | 当前证据 | 下一步验证 | 状态 |
 |---|---|---|---|---|
-| HYP-1 | 在当前控制设置下，data2 的 InEKF 与 ESKF 结果应接近。 | `EXP-20260304-inekf-ri-gvelgyro-fix` baseline：InEKF `1.044499 1.277957 1.263830`，ESKF `0.763591 0.565924 0.770052`，差异进一步扩大。 | 继续定位 `ISSUE-005/006`：联动检查 RI 量测/过程噪声映射的一致性而非单点修补。 | open（conflict） |
-| HYP-2 | 在当前 data2 设置中，仅冻结 `gnss_lever_arm` 的 post-GNSS 策略不足以保证后段稳定精度。 | 新 RI 版本 GNSS30：InEKF `40.557 89.686 66.555`（RMSE3D `118.819`）优于 ESKF `57.533 82.961 78.063`（RMSE3D `127.618`）。 | 将结论转为“实现相关”，继续补做冻结矩阵确认可观性收益是否稳健。 | rejected（被新实现证据推翻） |
-| HYP-3 | 外参相关状态的可观性对 GNSS 调度和运动激励高度敏感。 | 代码中已有弱激励冻结、ablation 与 consistency 统计机制。 | 运行受控消融矩阵并跟踪状态轨迹与一致性指标。 | open |
-| HYP-4 | RI GNSS 位置雅可比中的 `p_ned_local` 项可能在全程 GNSS 场景引入过强姿态耦合，从而拉低 baseline InEKF。 | `baseline_inekf_ctrl.log` 中 `||H_att||_F` 随时间增大到 `1e3` 量级，且 RMSE 较历史显著劣化。 | 设计 A/B：保留 RI 注入与 `F_vφ`，仅切换 `H_pos` 的 `p_ned_local` 项并比较 baseline/GNSS30 两场景。 | open |
-| HYP-5 | 仅补 `G(kVel,gyro)` 缺失项即可修复 `ISSUE-005`。 | `EXP-20260304-inekf-ri-gvelgyro-fix` 显示 baseline 与 GNSS30 InEKF 均劣化（baseline RMSE3D `2.079`；GNSS30 RMSE3D `165.933`）。 | 转向系统性 A/B：噪声映射符号约定、`ξ_p` 相关项及量测噪声一致性联合验证。 | rejected |
+| HYP-1 | data2 InEKF 与 ESKF 差异来自 `GNSS_POS`-RI 耦合与过程噪声映射，而非 `GNSS_VEL`。 | `p_local=on` 时 g0/g1 RMSE3D `1.692779/1.723701`；`p_local=off` 出现灾难性发散 (`4.12e7/1.05e6`)；corr(delta_err3d, delta_hatt) `-0.091572`。 | 需要进一步给出 `GNSS_POS` Jacobian 的时段因果解释（blocker：相关性较弱）。 | open(blocker: mechanistic_causality_missing) |
+| HYP-3 | 外参相关状态可观性对调度与激励敏感。 | 冻结矩阵 + 状态块漂移图 + mounting_roll 证据一致：`s1m1l0` post std_mr=0，RMSE3D `61.048699` vs ref `88.890428`。 | 已闭合（后续仅跨数据集复验）。 | resolved |
+| HYP-6 | RI 误差约定下，`G(kVel,gyro)` 更合理实现是 `+Skew(v_ned)C_bn`。 | data2 回归：baseline g0 最优但 gnss30 g1 最优；data4 开关短扫最佳 `p0_g1_i0`。 | 解释数据集差异的 RI 开关依赖关系。 | open(conditionally_supported) |
+| HYP-7 | true IEKF 的主要收益先体现在 `GNSS_POS` Lie 核心结构修正上；若不继续重写 ODO/NHC、GNSS_VEL 和 `21-30` 扩展块，sparse-GNSS 性能未必改善。 | fresh 对比：data2 baseline RMSE3D `1.723701→1.228326` 且 `H_att_max 2354→2.309982`；data2/data4 GNSS30 退化。后续消融显示 `no_gnss_vel` 基本不改善，而 `no_odo/no_nhc` 会大幅恶化。 | 继续重推 `ODO/NHC` 与 full-state reset，而不是优先处理 `GNSS_VEL`。 | open(very_strongly_supported) |
+| HYP-8 | `true_iekf` 在 sparse-GNSS 下的主要 blocker 不是 `GNSS_VEL`，而是仍为 hybrid 的 road-constraint 通道（`ODO/NHC`）及其与 `21-30` 扩展块的耦合/reset 一致性。 | data2 GNSS30: full/no_gnss_vel `201.158876/201.158876`，no_odo `370.355380`，no_nhc `716.565952`；data4 GNSS30: full/no_gnss_vel `115.499686/121.404109`，no_odo `669.763471`，no_nhc `784.539644`。 | 重推 `ODO/NHC` Jacobian 与 full-state reset Jacobian，再复测 GNSS30。 | open(strongly_supported) |
+
+### 已否决假设（压缩）
+
+- `HYP-2`：rejected（新实现证据推翻）
+- `HYP-4`：rejected（`p_ned_local` 单因子不是主因）
+- `HYP-5`：rejected（仅补单项 `G(kVel,gyro)` 不能修复）
 
 ## 会话日志（Session Log）
 
-### 模板（每次任务复制一条）
+### 历史阶段摘要（压缩，保留可追溯 ID）
 
-```text
-session_id: YYYYMMDD-HHMM-task_slug
-timestamp: local datetime
-objective:
-scope:
-changed_files:
-configs:
-commands:
-artifacts:
-metrics:
-  rmse_xyz:
-  rmse_3d:
-  p95_3d:
-  other:
-artifact_mtime:
-config_hash_or_mtime:
-dataset_time_window:
-result_freshness_check: pass|fail (reason)
-observability_notes:
-decision:
-next_step:
-```
+- 阶段A `20260304-1435 ~ 20260304-1855`：
+  - 完成协作文档与基础回归修复（`ISSUE-002/003` 关闭）。
+  - 相关 session: `20260304-1435-agent-doc-bootstrap`, `20260304-1505-agent-md-fix-bootstrap-and-context`, `20260304-1822-pre_experiment_audit`, `20260304-1855-fix-five-issues-and-md-check`。
+- 阶段B `20260304-2016 ~ 20260304-2318`：
+  - InEKF 从“FEJ 依赖版”重写到 RI 实现，再到 `G(kVel,gyro)` 单点修补。
+  - 关键实验: `EXP-20260304-inekf-refactor-minrisk-debug`, `EXP-20260304-inekf-rewrite-no-fej`, `EXP-20260304-inekf-ri-realization-codeoverhaul3`, `EXP-20260304-inekf-ri-gvelgyro-fix`。
+- 阶段C `20260304-2358 ~ 20260305-0018`：
+  - 审查 + deep-research + 顺序 A/B，锁定当前最优分支。
+  - 关键实验: `EXP-20260304-inekf-ri-fgqd-audit-r2`, `EXP-20260305-inekf-deep-research-audit-r1`, `EXP-20260305-inekf-ab-seq-r1`。
 
-### session_id: 20260304-1435-agent-doc-bootstrap
+### session_id: 20260305-0032-best4-regression-and-plot
 
-- timestamp: 2026-03-04 14:35 (local)
-- objective: 增加持久化协作规范与跨会话连续性文档。
+- timestamp: 2026-03-05 00:33 (local)
+- objective: 在最优开关分支上完成 4 组标准回归与绘图。
 - scope:
-  - 创建 `AGENT.md`
-  - 创建初始版 `walkthrough.md`
-  - 登记当前基线背景与已知冲突
+  - 运行 baseline/GNSS30 × ESKF/InEKF 四组回归。
+  - 生成单跑图和两组对比图。
 - changed_files:
-  - `AGENT.md`
-  - `walkthrough.md`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_*.yaml`
+  - `output/review/20260305-inekf-best4-reg-r1/*.log`
+  - `output/review/20260305-inekf-best4-reg-r1/SOL_*.txt`
+  - `output/review/20260305-inekf-best4-reg-r1/metrics_summary.csv`
+  - `output/review/20260305-inekf-best4-reg-r1/run_summary.md`
+  - `output/review/20260305-inekf-best4-reg-r1/plots/`
+  - `output/review/20260305-inekf-best4-reg-r1/compare_*`
 - configs:
   - `config_data2_baseline_eskf.yaml`
   - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_postfix_gnsslever_eskf.yaml`
-- commands:
-  - 仓库结构与关键文件扫描
-  - `output/logs_runcheck_*.log` 基线日志检查
-  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/*` 冲突检查
-- artifacts:
-  - `AGENT.md`
-  - `walkthrough.md`
-- metrics:
-  - baseline ESKF 日志 RMSE xyz: `0.763749 0.566040 0.770121`
-  - baseline InEKF 日志 RMSE xyz: `0.763 0.566 0.769`
-  - GNSS30 postfix 日志 RMSE xyz: `58.292 84.777 78.863`
-- artifact_mtime:
-  - `output/logs_runcheck_baseline_eskf.log`: 2026-03-04
-  - `output/logs_runcheck_baseline_inekf_ctrl.log`: 2026-03-04
-  - `output/logs_runcheck_gnss30_postfix_gnsslever_eskf.log`: 2026-03-04
-- config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04
-  - `config_data2_gnss30_postfix_gnsslever_eskf.yaml`: 2026-03-04
-- dataset_time_window:
-  - baseline 运行窗口约为 `528076.009368` 到 `530488.900000`（来自日志）
-- result_freshness_check: runcheck 日志为 pass；历史 compare 汇总为 fail（见 ISSUE-001）。
-- observability_notes:
-  - 已登记后续可观性分析关键开关:
-    - `fusion.ablation.*`
-    - `fusion.post_gnss_ablation.*`
-    - `fusion.gnss_schedule.*`
-    - pipeline 中 consistency 相关统计
-- decision:
-  - 在 compare 汇总重生前，以 runcheck 日志作为当前事实来源。
-- next_step:
-  - 使用同步的新 SOL 产物重算 ESKF vs InEKF 对比汇总。
-
-### session_id: 20260304-1505-agent-md-fix-bootstrap-and-context
-
-- timestamp: 2026-03-04 15:05 (local)
-- objective: 修复 AGENT.md 的循环依赖风险与上下文耗尽应急缺口。
-- scope:
-  - 修正 Section 3：内联 `walkthrough.md` 初始化模板
-  - 新增上下文即将耗尽时的强制收口协议
-- changed_files:
-  - `AGENT.md`
-- configs:
-  - 无
-- commands:
-  - 文档检查与补丁更新
-- artifacts:
-  - `AGENT.md`
-- metrics:
-  - 文档规范修订任务，无数值指标
-- artifact_mtime:
-  - `AGENT.md`: 2026-03-04
-- config_hash_or_mtime:
-  - N/A
-- dataset_time_window:
-  - N/A
-- result_freshness_check: pass（文档规则变更已落地并可读）
-- observability_notes:
-  - 无（本次仅为协作规范修订）
-- decision:
-  - `walkthrough.md` 缺失时，agent 直接按 AGENT.md 内联模板创建，避免引用不存在 schema。
-  - 上下文接近上限时，agent 必须立即执行 End Checklist 并在 `next_step` 写明中断点与恢复首步。
-- next_step:
-  - 在后续实际开发任务中执行一次“中断恢复演练”，验证应急协议可用性。
-
-### session_id: 20260304-1510-add-gnss30-inekf-compare
-
-- timestamp: 2026-03-04 15:10 (local)
-- objective: 新增 InEKF 对比实验（GNSS 前30% + 后段 INS/ODO/NHC）并完成解算与绘图。
-- scope:
-  - 新建 `config_data2_gnss30_inekf.yaml`
-  - 运行融合主程序并保存 runcheck 日志
-  - 生成单实验图集与 ESKF vs InEKF 对比图
-  - 修复 compare 脚本对无表头 LLA 真值的识别
-- changed_files:
+  - `config_data2_gnss30_eskf_nofreeze.yaml`
   - `config_data2_gnss30_inekf.yaml`
-  - `scripts/analysis/compare_fej_vs_standard.py`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_gnss30_inekf.yaml`
-  - `config_data2_gnss30_postfix_gnsslever_eskf.yaml`（对比参考）
 - commands:
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_inekf.yaml`
-  - `python plot_navresult.py SOL_data2_gnss30_inekf.txt`
-  - `python scripts/analysis/compare_fej_vs_standard.py --std SOL_data2_gnss30_postfix_gnsslever_eskf.txt --fej SOL_data2_gnss30_inekf.txt --truth dataset/data2_converted/POS_converted.txt --outdir output/compare_data2_gnss30_eskf_postfix_vs_inekf`
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-inekf-best4-reg-r1/cfg_*.yaml`
+  - `python plot_navresult.py output/review/20260305-inekf-best4-reg-r1/SOL_*.txt`
+  - `python scripts/analysis/compare_fej_vs_standard.py ...`
 - artifacts:
-  - `SOL_data2_gnss30_inekf.txt`
-  - `output/logs_runcheck_gnss30_inekf.log`
-  - `output/result_data230_inekf/`
-  - `output/compare_data2_gnss30_eskf_postfix_vs_inekf/summary.txt`
-  - `output/compare_data2_gnss30_eskf_postfix_vs_inekf/01_trajectory_compare.png`
-  - `output/compare_data2_gnss30_eskf_postfix_vs_inekf/02_position_error_norm_compare.png`
+  - `output/review/20260305-inekf-best4-reg-r1/metrics_summary.csv`
+  - `output/review/20260305-inekf-best4-reg-r1/run_summary.md`
+  - `output/review/20260305-inekf-best4-reg-r1/plots/`
+  - `output/review/20260305-inekf-best4-reg-r1/compare_baseline_eskf_vs_inekf_best/`
+  - `output/review/20260305-inekf-best4-reg-r1/compare_gnss30_eskf_vs_inekf_best/`
 - metrics:
-  - InEKF 日志 RMSE xyz: `92.918 104.149 149.448`
-  - InEKF 对比 RMSE 3D / P95 3D: `204.488 / 399.304` m
-  - 参考 ESKF(postfix) RMSE xyz / RMSE 3D: `58.292 84.777 78.863` / `129.632` m
+  - baseline ESKF/InEKF RMSE3D: `1.223242 / 1.723701`
+  - GNSS30 ESKF/InEKF RMSE3D: `127.618202 / 88.890702`
+  - `H_att_max`：baseline `2.321396 / 2354.037209`，GNSS30 `1.818384 / 2354.037209`
 - artifact_mtime:
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 15:08:24
-  - `SOL_data2_gnss30_inekf.txt`: 2026-03-04 15:09:08
-  - `output/logs_runcheck_gnss30_inekf.log`: 2026-03-04 15:09:08
-  - `output/result_data230_inekf/11_ecef_position.png`: 2026-03-04 15:09:30
-  - `output/compare_data2_gnss30_eskf_postfix_vs_inekf/summary.txt`: 2026-03-04 15:10:08
+  - `metrics_summary.csv`: 2026-03-05 00:33:30
+  - `run_summary.md`: 2026-03-05 00:35:41
 - config_hash_or_mtime:
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 15:08:24
-- dataset_time_window:
-  - `528076.009368` 到 `530488.900000`（来自 runcheck 日志）
-- result_freshness_check: pass（日志、SOL、图像均为本次任务时间窗内新生成，时间链一致）
-- observability_notes:
-  - 状态块 `21-30`（`odo_scale`, `mounting`, `lever_odo`, `lever_gnss`）本次均未冻结，`fusion.ablation.*` 为默认全启用。
-  - `fusion.post_gnss_ablation.*` 本次未启用；GNSS split 后未追加冻结。
-  - 调度窗口：`fusion.gnss_schedule.enabled=true`, `head_ratio=0.30`，GNSS 在 `t=528799.876` 后关闭；后段仅 IMU 预测 + NHC + ODO（UWB 关闭）。
-  - 行为判定：相对 `GNSS30 postfix ESKF`，InEKF 版本精度明显劣化（degraded）。
-- decision:
-  - 新增 `EXP-20260304-data2-gnss30-inekf` 作为 GNSS30 场景的 InEKF 对比基准。
-  - 当前 `head_ratio=0.30` 下，InEKF 直接切 GNSS 后漂移较大，需继续做 post-GNSS 状态冻结矩阵。
-- next_step:
-  - 固定 `head_ratio=0.30`，在 InEKF 下测试 post-GNSS `odo_scale/mounting/lever` 多组合冻结并对比后段漂移。
-
-### session_id: 20260304-1522-add-gnss30-eskf-nofreeze
-
-- timestamp: 2026-03-04 15:22 (local)
-- objective: 新增 ESKF 实验（GNSS 前30%启用，后段不固定 GNSS 杆臂，所有状态照常更新）。
-- scope:
-  - 新建 `config_data2_gnss30_eskf_nofreeze.yaml`
-  - 运行融合主程序并生成 runcheck 日志
-  - 生成单实验图集与 postfix-vs-nofreeze 对比摘要
-- changed_files:
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
-  - `config_data2_gnss30_postfix_gnsslever_eskf.yaml`（对比参考）
-- commands:
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_eskf_nofreeze.yaml`
-  - `python plot_navresult.py SOL_data2_gnss30_eskf_nofreeze.txt`
-  - `python scripts/analysis/compare_fej_vs_standard.py --std SOL_data2_gnss30_postfix_gnsslever_eskf.txt --fej SOL_data2_gnss30_eskf_nofreeze.txt --truth dataset/data2_converted/POS_converted.txt --outdir output/compare_data2_gnss30_eskf_postfix_vs_nofreeze`
-- artifacts:
-  - `SOL_data2_gnss30_eskf_nofreeze.txt`
-  - `output/logs_runcheck_gnss30_eskf_nofreeze.log`
-  - `output/result_data230_eskf_nofreeze/`
-  - `output/compare_data2_gnss30_eskf_postfix_vs_nofreeze/summary.txt`
-  - `output/compare_data2_gnss30_eskf_postfix_vs_nofreeze/02_position_error_norm_compare.png`
-- metrics:
-  - nofreeze 日志 RMSE xyz: `58.292 84.777 78.863`
-  - nofreeze RMSE 3D / P95 3D: `129.632 / 229.661` m
-  - 与 postfix-gnsslever 对比：`RMSE xyz / RMSE 3D / P95 3D` 全部一致
-- artifact_mtime:
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-  - `SOL_data2_gnss30_eskf_nofreeze.txt`: 2026-03-04 15:21:31
-  - `output/logs_runcheck_gnss30_eskf_nofreeze.log`: 2026-03-04 15:21:31
-  - `output/result_data230_eskf_nofreeze/11_ecef_position.png`: 2026-03-04 15:21:52
-  - `output/compare_data2_gnss30_eskf_postfix_vs_nofreeze/summary.txt`: 2026-03-04 15:22:06
-- config_hash_or_mtime:
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-- dataset_time_window:
-  - `528076.009368` 到 `530488.900000`（来自 runcheck 日志）
-- result_freshness_check: pass（日志、SOL、绘图、对比摘要均为本次任务时间窗内生成）
-- observability_notes:
-  - 状态块 `21-30`（`odo_scale`, `mounting`, `lever_odo`, `lever_gnss`）在 GNSS 关断后未冻结，持续按模型演化并参与约束更新。
-  - `fusion.post_gnss_ablation.enabled=false`，未施加任何 post-GNSS 状态冻结。
-  - 调度窗口：`fusion.gnss_schedule.enabled=true`, `head_ratio=0.30`，GNSS 在 `t=528799.876` 后关闭；后段传感器窗口为 IMU + NHC + ODO（UWB 关闭）。
-  - 行为判定：相对 `postfix-gnsslever`，本实验表现为中性（neutral），误差指标无可见变化。
-- decision:
-  - 新增 `EXP-20260304-data2-gnss30-eskf-nofreeze` 作为 ESKF 下“无 post-GNSS 冻结”对照基准。
-  - 在 ESKF+GNSS30 场景中，单独冻结 `gnss_lever_arm` 对结果影响不显著。
-- next_step:
-  - 以 nofreeze 为基准，继续测试 `odo_scale/mounting/lever` 多状态 post-GNSS 冻结组合。
-
-### session_id: 20260304-1526-push-updates-to-github
-
-- timestamp: 2026-03-04 15:26 (local)
-- objective: 将本地更新提交并上传到 GitHub 远端仓库。
-- scope:
-  - 汇总当前工作区改动并创建提交
-  - 推送到 `origin/main`
-  - 记录提交号与远端同步结果
-- changed_files:
-  - `walkthrough.md`
-- configs:
-  - N/A（本次为版本管理操作）
-- commands:
-  - `git add -A`
-  - `git commit -m "Add GNSS30 ESKF/InEKF experiments and update configs/docs"`
-  - `git push origin main`
-- artifacts:
-  - 远端分支更新: `origin/main`
-  - 提交: `e52160735c3c54881f65b1c7e95a776e3711de3c`
-- metrics:
-  - N/A（本次无新增算法数值指标）
-- artifact_mtime:
-  - commit time: 2026-03-04 15:25:59 +0800
-- config_hash_or_mtime:
-  - N/A
-- dataset_time_window:
-  - N/A
-- result_freshness_check: pass（远端已接收：`b94bd0b..e521607 main -> main`）
-- observability_notes:
-  - 无（本次未新增可观性实验，仅做代码同步）
-- decision:
-  - 当前实验与脚本更新已作为一个提交同步到 GitHub，后续实验在该提交基础上继续。
-- next_step:
-  - 按既定优先队列继续执行 `ISSUE-001` 与 post-GNSS 冻结矩阵实验。
-
-### session_id: 20260304-1822-pre_experiment_audit
-
-- timestamp: 2026-03-04 18:22 (local)
-- objective: 在下一轮解算实验前完成全仓系统审查并给出门禁结论。
-- scope:
-  - 全仓静态审查（C++ 主链路、配置解析、Python 分析脚本）
-  - 构建与脚本语法检查
-  - 关键异常输入复现（缺失真值、损坏 GNSS、`max_dt` 语义）
-  - 生成 `findings/evidence/go_no_go` 审查产物
-- changed_files:
-  - `output/review/20260304-1822-pre_experiment_audit/findings.md`
-  - `output/review/20260304-1822-pre_experiment_audit/findings.csv`
-  - `output/review/20260304-1822-pre_experiment_audit/evidence.md`
-  - `output/review/20260304-1822-pre_experiment_audit/go_no_go.md`
-  - `output/review/20260304-1822-pre_experiment_audit/build.log`
-  - `output/review/20260304-1822-pre_experiment_audit/py_compile.log`
-  - `output/review/20260304-1822-pre_experiment_audit/run_missing_truth.log`
-  - `output/review/20260304-1822-pre_experiment_audit/run_missing_truth_manual_init.exit.txt`
-  - `output/review/20260304-1822-pre_experiment_audit/run_invalid_gnss.log`
-  - `output/review/20260304-1822-pre_experiment_audit/run_invalid_gnss.exit.txt`
-  - `output/review/20260304-1822-pre_experiment_audit/run_maxdt_zero.log`
-  - `output/review/20260304-1822-pre_experiment_audit/run_maxdt_zero.exit.txt`
-  - `output/review/20260304-1822-pre_experiment_audit/quat_delta_sign_case.txt`
-  - `output/review/20260304-1822-pre_experiment_audit/restore_baseline.log`
-  - `output/review/20260304-1822-pre_experiment_audit/restore_baseline.exit.txt`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_eskf.yaml`（复现模板来源）
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`
-- commands:
-  - `cmake --build build --config Release`
-  - `python -m py_compile <all .py files>`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`（恢复基线 SOL 产物）
-- artifacts:
-  - `output/review/20260304-1822-pre_experiment_audit/findings.md`
-  - `output/review/20260304-1822-pre_experiment_audit/findings.csv`
-  - `output/review/20260304-1822-pre_experiment_audit/evidence.md`
-  - `output/review/20260304-1822-pre_experiment_audit/go_no_go.md`
-  - `output/review/20260304-1822-pre_experiment_audit/restore_baseline.log`
-- metrics:
-  - findings 计数: `P0=2, P1=1, P2=2`
-  - malformed GNSS 复现 RMSE xyz: `85.653040 248.759693 219.739878`
-  - missing truth + manual init 退出码: `-1073741819`
-  - baseline 恢复运行 RMSE xyz: `0.763749 0.566040 0.770121`
-- artifact_mtime:
-  - `output/review/20260304-1822-pre_experiment_audit/findings.md`: 2026-03-04 18:30:41
-  - `output/review/20260304-1822-pre_experiment_audit/findings.csv`: 2026-03-04 18:31:15
-  - `output/review/20260304-1822-pre_experiment_audit/evidence.md`: 2026-03-04 18:33:54
-  - `output/review/20260304-1822-pre_experiment_audit/go_no_go.md`: 2026-03-04 18:32:27
-  - `output/review/20260304-1822-pre_experiment_audit/run_invalid_gnss.log`: 2026-03-04 18:28:34
-  - `output/review/20260304-1822-pre_experiment_audit/run_missing_truth_manual_init.exit.txt`: 2026-03-04 18:27:48
-  - `output/review/20260304-1822-pre_experiment_audit/restore_baseline.log`: 2026-03-04 18:34:35
-- config_hash_or_mtime:
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth.yaml`: 2026-03-04 18:24:43
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`: 2026-03-04 18:24:57
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`: 2026-03-04 18:26:13
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`: 2026-03-04 18:29:58
-- dataset_time_window:
-  - 复现配置沿用 data2 基线窗口：约 `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（审查日志、退出码与报告文件时间链一致）
-- observability_notes:
-  - 本次任务以工程健壮性门禁为主，未新增消融矩阵或状态可观性结论。
-  - 涉及状态块 `21-30` 的行为仅做代码路径检查，未进行新的受控实验比较。
-- decision:
-  - 审查结论为 `NO-GO`：存在 `P0` 阻断项（`ISSUE-002`, `ISSUE-003`），不建议直接进入下一解算实验。
-- next_step:
-  - 先修复并回归 `ISSUE-002`（manual init 缺失真值崩溃）与 `ISSUE-003`（GNSS 载入失败非致命）。
-  - 修复后复跑本次四个复现场景，再继续 `ISSUE-001` 与 post-GNSS 冻结矩阵实验。
-
-### session_id: 20260304-1855-fix-five-issues-and-md-check
-
-- timestamp: 2026-03-04 18:55 (local)
-- objective: 修复审查中的 5 个问题并核查 `程序可能存在的问题.md` 对应代码，完成门禁回归。
-- scope:
-  - 修复 `F-001~F-005`（崩溃、GNSS 非致命错误、`max_dt` 语义、四元数双覆盖、GNSS 速度分支判据）
-  - 核查并补齐 `程序可能存在的问题.md`：InEKF H 符号一致性运行时校验、`run_state_ablation.py` 无表头容错
-  - 将剩余状态索引硬编码替换为 `StateIdx`（初始化与诊断日志）
-  - 构建与复现场景回归、恢复 baseline 产物
-- changed_files:
-  - `include/core/eskf.h`
-  - `src/app/config.cpp`
-  - `src/app/diagnostics.cpp`
-  - `src/app/evaluation.cpp`
-  - `src/app/initialization.cpp`
-  - `src/app/pipeline_fusion.cpp`
-  - `src/core/eskf_engine.cpp`
-  - `src/core/ins_mech.cpp`
-  - `src/core/measurement_models_uwb.cpp`
-  - `src/utils/math_utils.cpp`
-  - `scripts/analysis/run_state_ablation.py`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`
-- commands:
-  - `cmake --build build --config Release`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`
-  - `.\build\Release\eskf_fusion.exe --config output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`
-  - `python` 导入 `scripts/analysis/run_state_ablation.py` 并验证 `load_sol` fallback（无表头样例）
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`（恢复 baseline SOL）
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`（恢复 baseline SOL）
-- artifacts:
-  - `output/review/20260304-1855-fix_implementation/baseline_eskf.log`
-  - `output/review/20260304-1855-fix_implementation/baseline_inekf_ctrl.log`
-  - `output/review/20260304-1855-fix_implementation/missing_truth_manual_init.log`
-  - `output/review/20260304-1855-fix_implementation/invalid_gnss_clean.log`
-  - `output/review/20260304-1855-fix_implementation/invalid_gnss_clean.exit.txt`
-  - `output/review/20260304-1855-fix_implementation/maxdt_zero.log`
-  - `output/review/20260304-1855-fix_implementation/restore_baseline_eskf.log`
-  - `output/review/20260304-1855-fix_implementation/restore_baseline_inekf_ctrl.log`
-- metrics:
-  - baseline ESKF RMSE xyz: `0.763591 0.565924 0.770052`（对参考差值 `< 0.001`）
-  - baseline InEKF RMSE xyz: `0.763 0.565 0.769`（与参考差值在 `0.001` 量级内）
-  - missing truth + manual init: `EXIT_CODE=0`，`RMSE=nan nan nan`（受控退化，不崩溃）
-  - invalid GNSS: `EXIT_CODE=1`（fail-fast 生效）
-  - `max_dt=0`: `EXIT_CODE=0`，运行成功
-  - InEKF H 符号一致性运行时校验: `PASS`
-- artifact_mtime:
-  - `output/review/20260304-1855-fix_implementation/baseline_eskf.log`: 2026-03-04 18:58:16
-  - `output/review/20260304-1855-fix_implementation/baseline_inekf_ctrl.log`: 2026-03-04 18:58:52
-  - `output/review/20260304-1855-fix_implementation/missing_truth_manual_init.log`: 2026-03-04 18:59:24
-  - `output/review/20260304-1855-fix_implementation/invalid_gnss_clean.log`: 2026-03-04 19:03:03
-  - `output/review/20260304-1855-fix_implementation/maxdt_zero.log`: 2026-03-04 19:00:03
-  - `output/review/20260304-1855-fix_implementation/restore_baseline_eskf.log`: 2026-03-04 19:01:47
-  - `output/review/20260304-1855-fix_implementation/restore_baseline_inekf_ctrl.log`: 2026-03-04 19:02:22
-- config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04 14:25:04
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_missing_truth_manual_init.yaml`: 2026-03-04 18:24:57
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_invalid_gnss.yaml`: 2026-03-04 18:26:13
-  - `output/review/20260304-1822-pre_experiment_audit/tmp_maxdt_zero.yaml`: 2026-03-04 18:30:02
-- dataset_time_window:
-  - data2 基线窗口约为 `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（编译时间、回归日志时间、退出码与代码改动时间链一致）
-- observability_notes:
-  - 本次为工程健壮性修复，未新增可观性结论；状态块 `21-30` 的改动主要是索引统一与更新门控逻辑修正。
-  - 调度窗口：回归基线为 GNSS 全程启用（未启用 `fusion.gnss_schedule.*`）；异常复现配置同 18:22 审查模板。
-  - 行为判定：修复对 baseline 精度表现为中性（neutral），对异常输入处理显著改善（improved）。
-- decision:
-  - 解除 18:22 审查中的 `NO-GO` 阻断项（`ISSUE-002`, `ISSUE-003` 已验证关闭）。
-  - `程序可能存在的问题.md` 涉及代码段已完成核查与修复落地，当前可进入下一轮实验。
-- next_step:
-  - 优先处理 `ISSUE-001`：重跑 baseline compare 产物并消除历史 summary 冲突，再继续可观性矩阵实验。
-
-### session_id: 20260304-1912-write-phase1-combo-nav-tex
-
-- timestamp: 2026-03-04 19:12 (local)
-- objective: 编写第一阶段总结文档 `组合导航.tex`，对比“完整GNSS”与“前百分之30 GNSS”两组实验。
-- scope:
-  - 汇总 `config_data2_baseline_eskf.yaml` 与 `config_data2_gnss30_eskf_nofreeze.yaml` 参数
-  - 提取两组 runcheck 指标
-  - 按 01-10 图像编号将两组结果并排排版
-  - 生成可直接编译的 LaTeX 文档
-- changed_files:
-  - `组合导航.tex`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
-- commands:
-  - 读取两组配置文件内容
-  - 扫描 `output/result_data2_baseline_eskf/` 与 `output/result_data230_eskf_nofreeze/` 图像文件
-  - 读取 `output/logs_runcheck_baseline_eskf.log` 与 `output/logs_runcheck_gnss30_eskf_nofreeze.log`
-  - 写入 `组合导航.tex`
-- artifacts:
-  - `组合导航.tex`
-- metrics:
-  - 完整GNSS RMSE xyz: `0.763749 0.566040 0.770121`
-  - 前百分之30 GNSS RMSE xyz: `58.292 84.777 78.863`
-  - 图像对比范围: `01_trajectory_altitude` 到 `10_gnss_lever_arm`
-- artifact_mtime:
-  - `output/result_data2_baseline_eskf/01_trajectory_altitude.png`: 2026-03-04 14:11:01
-  - `output/result_data230_eskf_nofreeze/01_trajectory_altitude.png`: 2026-03-04 15:21:47
-  - `output/logs_runcheck_baseline_eskf.log`: 2026-03-04（同日生成）
-  - `output/logs_runcheck_gnss30_eskf_nofreeze.log`: 2026-03-04（同日生成）
-  - `组合导航.tex`: 2026-03-04
-- config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
+  - 基础配置未改；本轮使用 `output/review/20260305-inekf-best4-reg-r1/cfg_*.yaml`
 - dataset_time_window:
   - `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（配置、日志、图像均为同日可追溯产物，时间链一致）
+- result_freshness_check:
+  - pass（回归与绘图均在本会话生成）
 - observability_notes:
-  - 本次为文档汇总任务，未新增算法试验与可观性判定。
-  - 展示的状态相关图覆盖状态块 `21-30`（`odo_scale/mounting/lever/gnss_lever`）的估计轨迹对比。
-  - 调度窗口差异由 `fusion.gnss_schedule.enabled/head_ratio` 体现：完整GNSS（全程GNSS） vs 前30% GNSS（`head_ratio=0.30`）。
+  - 状态块 `21-30` 未做新的冻结/消融；本轮聚焦 `kPos/kVel/kAtt` RI 分支一致性。
+  - baseline: InEKF 相对 ESKF degraded；GNSS30: InEKF 相对 ESKF improved。
 - decision:
-  - 第一阶段总结文档已形成，满足“参数配置 + 指标对比 + 01-10 并排图”要求。
+  - 最优开关分支可复现，但 baseline 回归问题仍未闭环。
 - next_step:
-  - 编译 `组合导航.tex` 生成 PDF 并检查版式（图表跨页、字体、中文显示）。
+  - 开始 `G/F/H/Inject` 全链路符号一致性审查与交互项实验。
 
-### session_id: 20260304-tex-format-cleanup
-- objective: 优化 `算法文档/结果文档/组合导航.tex` 格式，使其适合对外展示
-- scope: 仅修改 tex 文档，不涉及代码或实验配置
+### session_id: 20260305-0042-tidy-walkthrough-and-promote-inekf-baseline
+
+- timestamp: 2026-03-05 00:42 (local)
+- objective: 精简 `walkthrough.md` 并将 best InEKF 方案固化为新的 InEKF 基线配置。
+- scope:
+  - 将过长会话日志压缩为阶段摘要，保留关键实验与未解决问题的可追溯性。
+  - 新增并固化两个 InEKF 基线配置文件。
 - changed_files:
+  - `walkthrough.md`
+  - `config_data2_baseline_inekf_best.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+- configs:
+  - `config_data2_baseline_inekf_best.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+- commands:
+  - `Get-Content/rg` 检查 `walkthrough.md` 结构与长度
+  - 脚本化生成 best 配置并修正 `generator.output_path`
+- artifacts:
+  - `walkthrough.md`（压缩版）
+  - `config_data2_baseline_inekf_best.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+- metrics:
+  - 文档整理任务，无新增解算指标。
+- artifact_mtime:
+  - `walkthrough.md`: 2026-03-05
+  - `config_data2_baseline_inekf_best.yaml`: 2026-03-05
+  - `config_data2_gnss30_inekf_best.yaml`: 2026-03-05
+- config_hash_or_mtime:
+  - 两个新配置均基于旧 InEKF 配置复制并显式写入 best 开关。
+- dataset_time_window:
+  - N/A（本会话未新跑解算）
+- result_freshness_check:
+  - pass（文档与配置更新完成，结构可读）
+- observability_notes:
+  - 本次仅文档与配置治理，无新增观测性实验。
+- decision:
+  - `config_data2_baseline_inekf_best.yaml` 与 `config_data2_gnss30_inekf_best.yaml` 作为新的 InEKF 基线入口。
+- next_step:
+  - 后续回归和对比默认使用 `*_inekf_best.yaml`；旧 `*_inekf_ctrl.yaml` 仅用于历史复现实验。
+
+### session_id: 20260305-1010-inekf-fghi-audit-and-doubleoff
+
+- timestamp: 2026-03-05 10:10 (local)
+- objective: 按优先队列继续执行 `F/G/H/Inject` 一致性审查，并补做 `p_off + inject_off` 交互实验。
+- scope:
+  - 审查 `src/core/ins_mech.cpp`, `src/core/measurement_models_uwb.cpp`, `src/core/eskf_engine.cpp` 的符号链路。
+  - 运行双关交互实验（baseline + GNSS30，各 1 组）。
+- changed_files:
+  - `output/review/20260305-inekf-fghi-sign-audit-r1/inekf_fghi_sign_audit.md`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/cfg_doubleoff_baseline.yaml`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/cfg_doubleoff_gnss30.yaml`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_baseline.log`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_gnss30.log`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/SOL_doubleoff_baseline.txt`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/SOL_doubleoff_gnss30.txt`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_metrics.csv`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_metrics.json`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/summary.md`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_inekf_best.yaml`（派生 `cfg_doubleoff_baseline.yaml`）
+  - `config_data2_gnss30_inekf_best.yaml`（派生 `cfg_doubleoff_gnss30.yaml`）
+- commands:
+  - `rg -n "F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt)|G.block<3, 3>(StateIdx::kVel, 3)|dv_ned -= Skew|dr_ned -= Skew|ri_gnss_pos_use_p_ned_local|ri_inject_pos_inverse" src/core/*.cpp include/core/eskf.h`
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-inekf-doubleoff-interaction-r1/cfg_doubleoff_baseline.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-inekf-doubleoff-interaction-r1/cfg_doubleoff_gnss30.yaml`
+  - `Select-String`/`Import-Csv` 解析 RMSE 与 `H_att_max`
+- artifacts:
+  - `output/review/20260305-inekf-fghi-sign-audit-r1/inekf_fghi_sign_audit.md`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_metrics.csv`
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/summary.md`
+- metrics:
+  - double-off baseline RMSE xyz: `196364.475508 505849.364849 291200.065746`
+  - double-off gnss30 RMSE xyz: `174296.339000 209616.276000 135334.838000`
+  - double-off RMSE3D baseline/GNSS30: `615824.703508 / 304357.873776`
+  - 对照（best 分支）RMSE3D baseline/GNSS30: `1.723701 / 88.890702`
+  - double-off `H_att_max` baseline/GNSS30: `20.722139 / 20.384733`
+- artifact_mtime:
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/doubleoff_metrics.csv`: 2026-03-05 10:07:42
+  - `output/review/20260305-inekf-doubleoff-interaction-r1/summary.md`: 2026-03-05 10:07:42
+  - `output/review/20260305-inekf-fghi-sign-audit-r1/inekf_fghi_sign_audit.md`: 2026-03-05 10:09:42
+- config_hash_or_mtime:
+  - `cfg_doubleoff_*.yaml` 由 `*_inekf_best.yaml` 派生，仅切换 `ri_gnss_pos_use_p_ned_local=false`, `ri_inject_pos_inverse=false`，保持 `ri_vel_gyro_noise_mode=1`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（实验与审查产物均在本会话生成）
+- observability_notes:
+  - 本轮直接影响状态块 `0-8`（`p/v/att`）的 RI 线性化与注入一致性。
+  - 状态块 `21-30`（`odo_scale/mounting/lever_*`）未做冻结或消融变更，行为保持原配置。
+  - 传感器窗口：baseline 为全程 GNSS；gnss30 为 `fusion.gnss_schedule.head_ratio=0.3` 的分段窗口。
+  - 双关关闭（`p_off + inject_off`）在两种窗口下均显著 degraded（实测发散）。
+- decision:
+  - 完成 `F/G/H/Inject` 一致性审查与双关交互排错；支持继续沿用 `p_on + g=+1 + inject_on` 作为 InEKF 默认研究分支。
+- next_step:
+  - 先处理 `ISSUE-001`（重生 baseline 对比目录并统一口径），再推进 post-GNSS 冻结矩阵实验。
+
+### session_id: 20260305-1018-issue001-baseline-compare-refresh
+
+- timestamp: 2026-03-05 10:18 (local)
+- objective: 执行优先队列第 1 项，重生 baseline 对比目录并降低 `ISSUE-001` 风险。
+- scope:
+  - 用 `config_data2_baseline_eskf.yaml` 与 `config_data2_baseline_inekf_best.yaml` 重新跑 baseline。
+  - 重建 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/` 的图表与指标文件。
+- changed_files:
+  - `output/review/20260305-issue001-baseline-compare-r1/cfg_baseline_eskf_r1.yaml`
+  - `output/review/20260305-issue001-baseline-compare-r1/cfg_baseline_inekf_best_r1.yaml`
+  - `output/review/20260305-issue001-baseline-compare-r1/baseline_eskf_r1.log`
+  - `output/review/20260305-issue001-baseline-compare-r1/baseline_inekf_best_r1.log`
+  - `output/review/20260305-issue001-baseline-compare-r1/SOL_baseline_eskf_r1.txt`
+  - `output/review/20260305-issue001-baseline-compare-r1/SOL_baseline_inekf_best_r1.txt`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.json`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.txt`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/metrics.csv`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/*.png`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`
+  - `config_data2_baseline_inekf_best.yaml`
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-issue001-baseline-compare-r1/cfg_baseline_eskf_r1.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-issue001-baseline-compare-r1/cfg_baseline_inekf_best_r1.yaml`
+  - `python scripts/analysis/compare_fej_vs_standard.py --std ...SOL_baseline_eskf_r1.txt --fej ...SOL_baseline_inekf_best_r1.txt --truth dataset/data2_converted/POS_converted.txt --outdir output/compare_data2_baseline_eskf_vs_inekf_ctrl`
+- artifacts:
+  - `output/review/20260305-issue001-baseline-compare-r1/*.log`
+  - `output/review/20260305-issue001-baseline-compare-r1/SOL_baseline_*.txt`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/metrics.csv`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.txt`
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.json`
+- metrics:
+  - ESKF RMSE xyz: `0.763591 0.565924 0.770052`（log）
+  - InEKF_best RMSE xyz: `0.947842 0.971213 1.062772`（log）
+  - 对比目录 RMSE3D ESKF/InEKF_best: `1.223243 / 1.723701`（metrics.csv）
+  - 旧冲突口径（历史目录）InEKF RMSE3D `54.721255` 已被新口径覆盖。
+- artifact_mtime:
+  - `output/review/20260305-issue001-baseline-compare-r1/baseline_eskf_r1.log`: 2026-03-05 10:17:09
+  - `output/review/20260305-issue001-baseline-compare-r1/baseline_inekf_best_r1.log`: 2026-03-05 10:17:44
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/metrics.csv`: 2026-03-05 10:18:18
+  - `output/compare_data2_baseline_eskf_vs_inekf_ctrl/summary.txt`: 2026-03-05 10:18:18
+- config_hash_or_mtime:
+  - 本轮配置由基线配置复制，仅改 `fusion.output_path` 指向本轮 `output/review/20260305-issue001-baseline-compare-r1/`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（解算、对比、图表均在本会话重生成）
+- observability_notes:
+  - 本轮未新增 ablation/freeze，状态块 `21-30` 行为未改。
+  - 重点是状态块 `0-8` 在统一口径下的 baseline 对比可复现性。
+  - 传感器窗口为 baseline 全程 GNSS（无 GNSS schedule 截断）。
+- decision:
+  - `ISSUE-001` 从 `open` 降级为 `downgraded`；后续 baseline 对比以重生产物为准。
+- next_step:
+  - 继续优先队列第 2 项：在 best 分支执行 post-GNSS 冻结矩阵（`odo_scale/mounting/lever`）。
+
+### session_id: 20260305-1029-postgnss-freeze-matrix-r1
+
+- timestamp: 2026-03-05 10:29 (local)
+- objective: 执行优先队列第 2 项，完成 best 分支下 post-GNSS 冻结矩阵实验并补齐状态块 `21-30` 可观性证据。
+- scope:
+  - 以 `config_data2_gnss30_inekf_best.yaml` 为基线，构造 `odo_scale/mounting/lever_all` 的 2^3 冻结矩阵。
+  - 统一启用 `constraints.enable_consistency_log=true`，记录 `accept_ratio/nis_*`。
+- changed_files:
+  - `output/review/20260305-postgnss-freeze-matrix-r1/cfg_s*.yaml`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/s*.log`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/SOL_s*.txt`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/freeze_matrix_metrics.csv`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/freeze_matrix_metrics.json`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/summary.md`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_inekf_best.yaml`（派生 8 组 `cfg_s{0|1}m{0|1}l{0|1}.yaml`）
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-postgnss-freeze-matrix-r1/cfg_s*.yaml`
+  - 解析日志中的 `RMSE (融合) [m]`、`[Consistency] NHC/ODO ...`、`||H_att||_F`
+- artifacts:
+  - `output/review/20260305-postgnss-freeze-matrix-r1/freeze_matrix_metrics.csv`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/summary.md`
+  - `output/review/20260305-postgnss-freeze-matrix-r1/s*.log`
+- metrics:
+  - 参考分支（无 post ablation）`s0m0l0` RMSE3D: `88.890702`
+  - 最优分支 `s1m1l0`（freeze scale+mounting）RMSE3D: `61.048358`（delta `-27.842344`）
+  - `freeze_mounting` 相关分支整体优于未冻结；`freeze_lever` 单独冻结最差（`95.202506`）
+  - NHC/ODO `accept_ratio` 约 `1.000`，`nis_mean` 基本稳定（NHC `0.049`，ODO `0.183`）
+- artifact_mtime:
+  - `freeze_matrix_metrics.csv`: 2026-03-05 10:28:45
+  - `summary.md`: 2026-03-05 10:28:45
+  - `s1m1l0.log`: 2026-03-05 10:28:10
+- config_hash_or_mtime:
+  - 各分支仅改 `fusion.post_gnss_ablation.*`、`fusion.constraints.enable_consistency_log` 与 `fusion.output_path`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（8 组实验与汇总均在本会话生成）
+- observability_notes:
+  - 冻结块映射：`odo_scale(21)`、`mounting(22-24)`、`lever_all(25-30)`。
+  - 传感器窗口：`gnss_schedule.head_ratio=0.3`，GNSS 在 split 后关闭，冻结在 post-GNSS 生效。
+  - 行为：冻结 `mounting` 明显 improved；冻结 `lever_all` 在未冻结 `mounting` 时 degraded；冻结 `odo_scale` 单独影响较小。
+- decision:
+  - post-GNSS 阶段优先冻结 `mounting`（可叠加 `odo_scale`），暂不建议单独冻结 `lever_all`。
+- next_step:
+  - 执行优先队列第 3 项：定位 baseline `g=0` vs `g=+1` 的差异来源。
+
+### session_id: 20260305-1033-baseline-gmode-sensitivity-r1
+
+- timestamp: 2026-03-05 10:33 (local)
+- objective: 执行优先队列项，定位 baseline `g=0` vs `g=+1` 差异并检查时段敏感性。
+- scope:
+  - 基于 `config_data2_baseline_inekf_best.yaml` 仅切换 `ri_vel_gyro_noise_mode={0,1}`。
+  - 提取整体 RMSE、分时段 RMSE（head/tail）、`H_att` 分时段均值与 `accept_ratio/nis_*`。
+- changed_files:
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/cfg_gmode_0.yaml`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/cfg_gmode_1.yaml`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/gmode_0.log`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/gmode_1.log`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/SOL_gmode_0.txt`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/SOL_gmode_1.txt`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/gmode_sensitivity_metrics.csv`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/gmode_sensitivity_metrics.json`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/summary.md`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_inekf_best.yaml`（派生 `cfg_gmode_0.yaml`, `cfg_gmode_1.yaml`）
+- commands:
+  - `build/Release/eskf_fusion.exe --config .../cfg_gmode_0.yaml`
+  - `build/Release/eskf_fusion.exe --config .../cfg_gmode_1.yaml`
+  - 解析日志中的 `RMSE (融合) [m]`、`[Consistency] NHC/ODO...` 与 `[GNSS_POS] ||H_att||_F`
+- artifacts:
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/gmode_sensitivity_metrics.csv`
+  - `output/review/20260305-baseline-gmode-sensitivity-r1/summary.md`
+- metrics:
+  - RMSE3D `g0/g1`: `1.692779 / 1.723701`（`g0` 略优 `-0.030922`）
+  - head/tail RMSE3D：`g0=1.676679/1.708728`，`g1=1.789767/1.655000`
+  - `H_att_mean_head/tail`：`g0=1242.988/1161.861`，`g1=1242.915/1161.867`
+  - NHC/ODO `accept_ratio` 近似不变（约 `0.99998/0.99968`）
+- artifact_mtime:
+  - `gmode_sensitivity_metrics.csv`: 2026-03-05 10:33:14
+  - `summary.md`: 2026-03-05 10:33:14
+- config_hash_or_mtime:
+  - 仅切换 `fusion.fej.ri_vel_gyro_noise_mode` 与 `constraints.enable_consistency_log`、`output_path`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（两组解算与统计均在本会话生成）
+- observability_notes:
+  - 本轮聚焦状态块 `0-8` 的时段敏感性；状态块 `21-30` 无新增冻结。
+  - 传感器窗口为 baseline 全程 GNSS。
+- decision:
+  - baseline 的 `g` 模式差异较小但有时段互补，`ISSUE-005/006` 仍需结合 `GNSS vel` 进一步定位。
+- next_step:
+  - 继续验证 post-GNSS 冻结策略的窗口稳健性（`head_ratio` 多取值）。
+
+### session_id: 20260305-1039-postgnss-headratio-robustness-r1
+
+- timestamp: 2026-03-05 10:39 (local)
+- objective: 执行优先队列项，验证 post-GNSS `freeze(scale+mounting)` 在不同 `head_ratio` 下的稳健性。
+- scope:
+  - `head_ratio={0.2,0.3,0.4,0.5}`。
+  - 每个 ratio 对比 `ref(无冻结)` 与 `freeze_sm(冻结 scale+mounting)`。
+- changed_files:
+  - `output/review/20260305-postgnss-headratio-robustness-r1/cfg_r*_ref.yaml`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/cfg_r*_freeze_sm.yaml`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/r*_*.log`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/SOL_r*_*.txt`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/headratio_robustness_metrics.csv`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/headratio_robustness_metrics.json`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/summary.md`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_inekf_best.yaml`（派生 8 组 ratio×case 配置）
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-postgnss-headratio-robustness-r1/cfg_r*_*.yaml`
+  - 解析日志中的 `RMSE (融合) [m]` 与 `Consistency` 统计
+- artifacts:
+  - `output/review/20260305-postgnss-headratio-robustness-r1/headratio_robustness_metrics.csv`
+  - `output/review/20260305-postgnss-headratio-robustness-r1/summary.md`
+- metrics:
+  - ratio `0.2`: ref/freeze `114.476766 / 65.755126`（delta `-48.721640`）
+  - ratio `0.3`: ref/freeze `88.890702 / 61.048358`（delta `-27.842344`）
+  - ratio `0.4`: ref/freeze `87.671761 / 68.353867`（delta `-19.317894`）
+  - ratio `0.5`: ref/freeze `64.185725 / 52.388133`（delta `-11.797592`）
+  - NHC/ODO `accept_ratio` 维持 `1.000/1.000`
+- artifact_mtime:
+  - `headratio_robustness_metrics.csv`: 2026-03-05 10:38:52
+  - `summary.md`: 2026-03-05 10:38:52
+- config_hash_or_mtime:
+  - 仅切换 `gnss_schedule.head_ratio`、`post_gnss_ablation` 开关与 `output_path`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（4×2 组实验与汇总均在本会话生成）
+- observability_notes:
+  - 冻结块作用于 `odo_scale(21)` 与 `mounting(22-24)`，在 GNSS 关闭后生效。
+  - 各窗口均 improved，说明 `mounting` 冻结结论对 GNSS 调度比例具稳健性。
+- decision:
+  - `freeze(scale+mounting)` 可作为 post-GNSS 默认候选策略；后续可再做状态 `21-30` 漂移图佐证。
+- next_step:
+  - 回到 `HYP-1`：把 baseline 的时段差异定位到 `GNSS vel` 与过程噪声耦合项。
+
+### session_id: 20260305-1048-stage-summary-writeback
+
+- timestamp: 2026-03-05 10:48 (local)
+- objective: 将“阶段性成果总结”写入 `walkthrough.md`，形成可直接引用的里程碑摘要。
+- scope:
+  - 汇总当前阶段关键实验与结论。
+  - 在不改动实验结论的前提下，补充文档层总结段落。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - N/A（文档任务）
+- commands:
+  - `Get-Content walkthrough.md`
+  - 文档写回（summary section + session log）
+- artifacts:
+  - `walkthrough.md`（新增“阶段性成果总结”）
+- metrics:
+  - 文档任务，无新增解算指标。
+- observability_notes:
+  - 本次仅归纳已有证据，不新增状态块冻结/消融实验。
+- decision:
+  - 阶段性成果已在文档中固化，便于后续复盘与对外同步。
+- next_step:
+  - 继续执行当前优先队列（机制定位 + 状态块时序分析）。
+
+## 阶段性成果总结（截至 2026-03-05）
+
+1. InEKF 已收敛到可复现实验分支：`p_ned_local=ON, g=+1, inject=ON`。
+2. `ISSUE-001` 已通过口径重生降级：baseline 对比统一为 ESKF/InEKF_best `RMSE3D=1.223243/1.723701`。
+3. `F/G/H/Inject` 一致性证据链闭环：双关关闭（`p_off+inject_off`）出现灾难性发散，反证当前链路选择合理。
+4. post-GNSS 冻结矩阵显示 `mounting` 是关键块：`s1m1l0` 相比参考 `s0m0l0` 改善 `-27.842344`。
+5. 冻结策略对 `gnss_schedule.head_ratio` 具稳健性：`0.2/0.3/0.4/0.5` 全部 improved（delta `-48.72~-11.80`）。
+6. baseline `g=0` vs `g=+1` 差异已缩小并定位为“时段敏感”问题：`g0/g1=1.692779/1.723701`，但 `HYP-1` 仍未闭合。
+7. data2 `GNSS_POS` 机制补全完成：`p_local=on` 差异小，`p_local=off` 灾难性发散，corr `-0.091572`。
+8. data2 mounting_roll 可观性补证：`s1m1l0` post std_mr=0，RMSE3D `61.048699`。
+9. data4 InEKF 最优开关为 `p0_g1_i0`，baseline RMSE3D `0.876829` 优于 ESKF `0.929070`。
+10. data4 GNSS30 退化明显：ESKF/InEKF RMSE3D `51.371318/73.714930`；冻结矩阵 best `s0m1l1` 改善 `-6.962252`。
+11. 四份结果文档已全部重生并可编译通过（含 `组合导航.tex`）。
+
+### session_id: 20260305-1058-gmode-gnssvel-and-state21-30-drift
+
+- timestamp: 2026-03-05 10:58 (local)
+- objective: 按优先队列继续执行，完成 `g=0/1` 机制排查并输出状态块 `21-30` 时序漂移证据。
+- scope:
+  - 跑 `g=0/1 × GNSS速度 on/off` 四组对照，验证 `GNSS_VEL` 是否为主因。
+  - 基于 post-GNSS 冻结矩阵解算结果，生成状态块 `21-30` 漂移统计与图。
+- changed_files:
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/GNSS_converted_7col.txt`
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/cfg_g*_vel*.yaml`
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/g*_vel*.log`
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/SOL_g*_vel*.txt`
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/gnssvel_mechanism_metrics.csv`
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/summary.md`
+  - `output/review/20260305-state21_30-drift-r1/state21_30_postgnss_drift.csv`
+  - `output/review/20260305-state21_30-drift-r1/summary.md`
+  - `output/review/20260305-state21_30-drift-r1/01_odo_scale_postgnss.png`
+  - `output/review/20260305-state21_30-drift-r1/02_mounting_postgnss.png`
+  - `output/review/20260305-state21_30-drift-r1/03_lever_norm_postgnss.png`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_inekf_best.yaml`（派生 `cfg_g*_vel*.yaml`）
+  - `output/review/20260305-postgnss-freeze-matrix-r1/cfg_s*.yaml`（作为状态块漂移分析输入）
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/cfg_g*_vel*.yaml`
+  - 解析日志中的 `RMSE (融合) [m]`、`[Consistency] ...`、`[GNSS_POS] ||H_att||_F`
+  - 读取 `SOL_s*.txt` 计算 post-GNSS 漂移统计并绘图
+- artifacts:
+  - `output/review/20260305-baseline-gmode-gnssvel-mechanism-r1/gnssvel_mechanism_metrics.csv`
+  - `output/review/20260305-state21_30-drift-r1/state21_30_postgnss_drift.csv`
+  - `output/review/20260305-state21_30-drift-r1/*.png`
+- metrics:
+  - 机制排查：`vel_on/off` 下 `g0/g1` 完全一致（`1.692779/1.723701`），`delta(g0-g1)=-0.030922` 不变。
+  - 说明 data2 当前配置下 `GNSS_VEL` 非主因（文件仅 7 列，实际无速度更新）。
+  - 状态块漂移：最优 `s1m1l0` 相对参考 `s0m0l0` RMSE3D 改善 `-27.842344`；且 `mounting_pitch/yaw` post-GNSS 漂移约 0。
+- artifact_mtime:
+  - `gnssvel_mechanism_metrics.csv`: 2026-03-05 10:55:57
+  - `state21_30_postgnss_drift.csv`: 2026-03-05 10:57:55
+  - `03_lever_norm_postgnss.png`: 2026-03-05 10:57:58
+- config_hash_or_mtime:
+  - 机制排查分支仅改 `ri_vel_gyro_noise_mode`、`gnss_path`、`output_path`、`enable_consistency_log`。
+- dataset_time_window:
+  - `528076.009368` 到 `530488.900000`
+- result_freshness_check:
+  - pass（四组机制对照 + 状态块漂移图均在本会话生成）
+- observability_notes:
+  - 状态块映射：`21=odo_scale`, `22-24=mounting`, `25-30=lever_*`（`mounting_roll` 未写入 SOL，当前仅可视化 pitch/yaw）。
+  - post-GNSS 窗口下，冻结 `mounting` 的分支表现 improved，且 mounting 时序最稳定。
+- decision:
+  - `HYP-1` 机制已收缩：先排除 `GNSS_VEL`，后续重点转向 `GNSS_POS` 与过程噪声耦合。
+- next_step:
+  - 深挖 `GNSS_POS` 相关项在 `g=0/1` 下的时段作用机制，并定义 `ISSUE-005/006` 关闭门槛。
+
+### session_id: 20260305-1611-automation-worktree-overview
+
+- timestamp: 2026-03-05 16:11 (local)
+- objective: 回答“自动化与工作树功能”的概念说明（面向 Codex app）。
+- scope:
+  - 读取官方说明，整理高层功能描述。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `Get-Content walkthrough.md`
+  - `Get-Date -Format "yyyy-MM-dd HH:mm"`
+  - `web.run (openai.com/help.openai.com)`
+- artifacts:
+  - `walkthrough.md`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本次为产品说明，无新增实验或状态块分析。
+- decision:
+  - 输出 Codex app 的自动化与工作树功能概述，并提示可进一步讲解 Git worktree 细节。
+- next_step:
+  - 等待用户确认是否需要 Git worktree 的更深入讲解或示例。
+
+### session_id: 20260305-2222-inekf-eskf-data2-data4-pipeline
+
+- timestamp: 2026-03-05 22:22 (local)
+- objective: 完成 data2 优先队列闭环、data4 主实验与四份结果文档重生。
+- scope:
+  - data2：GNSS_POS 机制补全、mounting_roll 可观性补证、过程噪声映射回归、冻结矩阵重跑。
+  - data4：InEKF 开关短扫、main4 回归、GNSS30 冻结矩阵、GNSS 速度敏感性。
+  - 文档：重生 4 份结果文档并编译通过。
+- changed_files:
+  - `scripts/analysis/run_research_pipeline.py`
+  - `config_data4_baseline_eskf.yaml`
+  - `config_data4_baseline_inekf_best.yaml`
+  - `config_data4_gnss30_eskf.yaml`
+  - `config_data4_gnss30_inekf_best.yaml`
+  - `output/review/EXP-20260305-data2-gnsspos-mechanism-r2/*`
+  - `output/review/EXP-20260305-data2-mountroll-observability-r1/*`
+  - `output/review/EXP-20260305-data2-process-noise-regression-r1/*`
+  - `output/review/EXP-20260305-data2-postgnss-freeze-matrix-r2/*`
+  - `output/review/EXP-20260305-data4-inekf-switchscan-r1/*`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/*`
+  - `output/review/EXP-20260305-data4-gnss30-freeze-matrix-r1/*`
+  - `output/review/EXP-20260305-data4-gnssvel-sensitivity-r1/*`
+  - `output/review/EXP-20260305-data2-main4-docsync-r1/*`
+  - `output/review/EXP-20260305-research-pipeline-summary/*`
   - `算法文档/结果文档/组合导航.tex`
-- configs: 无
-- commands: 无（纯文档编辑）
-- artifacts: `算法文档/结果文档/组合导航.tex`（已更新）
-- metrics: 无（非算法实验）
-- artifact_mtime: 2026-03-04
-- config_hash_or_mtime: N/A
-- dataset_time_window: N/A
-- result_freshness_check: N/A
-- observability_notes: 本次为文档格式任务，无可观性操作。
+  - `算法文档/结果文档/data2_inekf_gnss30_对比冻结.tex`
+  - `算法文档/结果文档/data4_eskf_全程_vs_30GNSS.tex`
+  - `算法文档/结果文档/data4_inekf_gnss30_对比冻结.tex`
+  - `算法文档/结果文档/tex_compile_status.csv`
+  - `算法文档/结果文档/doc_assets_index.json`
+- configs:
+  - data2: `config_data2_baseline_eskf.yaml`, `config_data2_baseline_inekf_best.yaml`,
+    `config_data2_gnss30_eskf_nofreeze.yaml`, `config_data2_gnss30_inekf_best.yaml`
+  - data4: `config_data4_baseline_eskf.yaml`, `config_data4_baseline_inekf_best.yaml`,
+    `config_data4_gnss30_eskf.yaml`, `config_data4_gnss30_inekf_best.yaml`
+- commands:
+  - `python scripts/analysis/run_research_pipeline.py --phase all --head-ratio 0.3`
+  - `python scripts/analysis/run_research_pipeline.py --phase docs --head-ratio 0.3`
+  - `xelatex` 编译 4 份结果文档
+- artifacts:
+  - `output/review/EXP-20260305-research-pipeline-summary/experiment_manifest.json`
+  - `output/review/EXP-20260305-research-pipeline-summary/metrics_summary.csv`
+  - 4 份 PDF（见 `算法文档/结果文档/*.pdf`）
+- metrics:
+  - data2 main4 RMSE3D: baseline ESKF/InEKF `1.223243/1.723701`, GNSS30 `127.618348/88.890428`
+  - data2 冻结矩阵 best: `s1m1l0` RMSE3D `61.048699` (delta `-27.841730`)
+  - data4 main4 RMSE3D: baseline ESKF/InEKF `0.929070/0.876829`, GNSS30 `51.371318/73.714930`
+  - data4 冻结矩阵 best: `s0m1l1` RMSE3D `66.752679` (delta `-6.962252`)
+- artifact_mtime:
+  - `EXP-20260305-research-pipeline-summary/run_summary.json`: 2026-03-05 22:20:49
+  - `tex_compile_status.csv`: 2026-03-05 22:20:49
+- config_hash_or_mtime:
+  - data4 InEKF best switches 固化为 `p_local=OFF, g=+1, inject=OFF`
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（所有实验与文档在本会话生成）
+- observability_notes:
+  - 状态块映射：`21=odo_scale`, `22=mounting_roll`, `23=mounting_pitch`, `24=mounting_yaw`,
+    `25-27=lever_odo`, `28-30=lever_gnss`。
+  - data2 post-GNSS 冻结：`freeze(scale+mounting)` improved；`mounting_roll` post std 为 0。
+  - data4 GNSS30 冻结：best `s0m1l1` improved；`freeze_lever` 相对均衡但改善有限。
 - decision:
-  - 删除 `\lstinputlisting` 整段嵌入原始 YAML 配置（两段）及 listings/xcolor/subcaption/longtable 包引用；
-  - 配置对比表改为只展示功能性差异（GNSS 调度开关、后段处理、滤波器类型），不展示工程路径/内部参数键名；
-  - 结果指标表精简有效数字（4位→3位），移除内部日志路径引用；
-  - 图像布局从 `0.48\textwidth` 双列并排改为每张独占一行 `0.82\textwidth`，大标题说明方案身份；
-  - 添加目录 `\tableofcontents`，各小节用 `\subsection` 组织；
-  - 标题/作者去除工程内部信息。
+  - data4 InEKF 最优开关采用 `p0_g1_i0`，基线与 GNSS30 以该开关为准。
+  - HYP-3 已闭合；ISSUE-005/006 以证据闭合，无需代码改动。
+  - 四份结果文档已重生并可编译通过。
 - next_step:
-  - 使用 xelatex 或 lualatex 编译 `组合导航.tex` 并检查 PDF 输出。
+  - 解释 data4 GNSS30 下 InEKF 相对 ESKF 的退化原因，并明确是否采用冻结策略作为最终报告口径。
 
-### session_id: 20260304-2016-inekf-refactor-minrisk-debug
+### session_id: 20260306-1003-inekf-tex-code-audit-r1
 
-- timestamp: 2026-03-04 20:16 (local)
-- objective: 按 `代码大修.md` 落地 RI-EKF/FEJ 相关改动，并按最小风险原则逐步回归调试。
+- timestamp: 2026-03-06 10:03 (local)
+- objective: 逐条检查程序中的 InEKF 实现是否符合 `算法文档/可观性分析讨论与InEKF算法.tex` 的推导。
 - scope:
-  - 扩展 `FejManager`（冻结比力/速度字段与初始化签名），并修复 `BuildProcessModel` 声明-实现不一致。
-  - `EskfEngine::Predict` 统一传递 `fej_` 指针；保留/确认 `Correct` 的位置/速度/姿态修正防护。
-  - `RunGnssUpdate` 将 FEJ 初始化前置到首次 GNSS `Correct` 之前，并增加 FEJ 初始化与 `H_att` 诊断日志。
-  - GNSS 位置/速度模型补充 FEJ 感知线性化，且对 `gnss_lever_arm0≈0` 的场景增加冻结保护（避免不必要退化）。
-  - 执行 `F_rφ` A/B 调试与 4 组配置回归（baseline ESKF/InEKF + GNSS30 ESKF/InEKF）。
+  - 对照 `A_c/B_\theta/G/H/Inject/Joseph/reset` 六条主链路。
+  - 只做源码/文档一致性审查，不改动估计算法数值逻辑。
 - changed_files:
-  - `include/core/eskf.h`
-  - `src/core/ins_mech.cpp`
-  - `src/core/eskf_engine.cpp`
-  - `src/core/measurement_models_uwb.cpp`
-  - `src/app/pipeline_fusion.cpp`
+  - `output/review/20260306-inekf-tex-code-audit-r1/inekf_tex_code_audit.md`
+  - `walkthrough.md`
+  - `算法文档/walkthrough.md`
+- configs:
+  - N/A（代码/文档审查）
+- commands:
+  - `rg -n` 定位 `walkthrough.md`、`算法文档/可观性分析讨论与InEKF算法.tex` 与 InEKF 相关源码
+  - `Get-Content` 分段核对 `include/core/eskf.h`, `src/core/ins_mech.cpp`, `src/core/measurement_models_uwb.cpp`, `src/core/eskf_engine.cpp`
+  - `New-Item -ItemType Directory -Force output/review/20260306-inekf-tex-code-audit-r1`
+- artifacts:
+  - `output/review/20260306-inekf-tex-code-audit-r1/inekf_tex_code_audit.md`
+- metrics:
+  - 检查项 `9`
+  - exact match `1`（Joseph）
+  - partial match `3`
+  - mismatch/undocumented `5`
+- artifact_mtime:
+  - `output/review/20260306-inekf-tex-code-audit-r1/inekf_tex_code_audit.md`: 2026-03-06 10:03
+- config_hash_or_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`: workspace 当前版本（直接对照）
+- dataset_time_window:
+  - N/A（本会话未运行解算）
+- result_freshness_check:
+  - pass（结论基于当前 workspace 源码与同会话生成的审查报告）
+- observability_notes:
+  - 状态块映射：Lie 核心审查聚焦 `kPos/kVel/kAtt`；外参与尺度块聚焦 `21=odo_scale`, `22-24=mounting`, `25-27=lever_odo`, `28-30=lever_gnss`。
+  - GNSS 更新窗口：源码中 `GNSS_POS` 的 InEKF Jacobian 实际使用 `p_local + lever_ned` 姿态项与 `C_bn` 杆臂列；这意味着 `28-30` 并非文档当前写法下的 `I_3` 扩展列。
+  - ODO/NHC 更新窗口：未冻结/未消融任何状态块；InEKF 分支将直接姿态列置零，但 `21-30` 相关外参列仍通过当前 `C_bn/v/omega` 参与线性化；本会话为静态审查，improved/degraded/neutral 记为 `neutral`。
+  - `fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*`、`fusion.uwb_anchor_schedule.*` 本会话均未改动。
+- decision:
+  - 当前程序应定性为“RI-inspired hybrid ESKF”，而非 `tex` 当前正文那种直接在 `SE_2(3)` Lie 核心坐标上运行的逐式实现。
+  - `ISSUE-007-inekf-tex-code-gap` 打开；`HYP-1/HYP-6` 的机理解释得到源码侧补强，但尚未替代时段量化证据。
+- next_step:
+  - 二选一收敛：要么把 `算法文档/可观性分析讨论与InEKF算法.tex` 改写为当前 NED/ECEF 混合实现的真实公式，要么把代码重构到文中 `SE_2(3)` / invariant residual / reset Jacobian 口径。
+
+### session_id: 20260306-1012-inekf-architecture-choice
+
+- timestamp: 2026-03-06 10:12 (local)
+- objective: 基于“目标是实现尽可能避免可观性泄露的 IEKF”给出架构选择建议。
+- scope:
+  - 不改代码；只在前一轮源码-文档审查基础上做路线决策。
+  - 明确“文档贴代码”与“代码贴文档”的适用场景。
+- changed_files:
   - `walkthrough.md`
 - configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
+  - N/A（架构建议）
 - commands:
-  - `cmake --build build --config Release`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_inekf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_eskf_nofreeze.yaml`
-  - `F_rφ` A/B 调试日志：`baseline_eskf_frphi_zero.log`, `baseline_eskf_frphi_plus_serial.log`, `baseline_eskf_frphi_minus_serial.log`
+  - `Get-Content walkthrough.md -Tail 80`
+  - `Get-Date -Format 'yyyyMMdd-HHmm'`
 - artifacts:
-  - `output/review/20260304-2016-code_overhaul_debug/baseline_eskf_final.log`
-  - `output/review/20260304-2016-code_overhaul_debug/baseline_inekf_after_gnss_lever_guard.log`
-  - `output/review/20260304-2016-code_overhaul_debug/gnss30_inekf_final.log`
-  - `output/review/20260304-2016-code_overhaul_debug/gnss30_eskf_nofreeze_final.log`
+  - N/A
 - metrics:
-  - baseline ESKF RMSE xyz / RMSE3D: `0.763591 0.565924 0.770052` / `1.223`
-  - baseline InEKF RMSE xyz / RMSE3D: `0.763260 0.565492 0.769397` / `1.222`
-  - baseline InEKF - ESKF 差值 xyz: `-0.000331 -0.000432 -0.000655`
-  - GNSS30 InEKF RMSE xyz / RMSE3D: `49.895 72.609 102.467` / `135.134`
-  - GNSS30 ESKF RMSE xyz / RMSE3D: `57.533 82.961 78.063` / `127.618`
-  - `F_rφ` 调试：`F_rφ=0` 时 baseline 恢复 `0.763591 0.565924 0.770052`；直接启用耦合项出现超过阈值的回归偏移（见 A/B 日志）。
+  - N/A（决策性会话，无新增数值实验）
 - artifact_mtime:
-  - `output/review/20260304-2016-code_overhaul_debug/baseline_eskf_final.log`: 2026-03-04 20:36:44
-  - `output/review/20260304-2016-code_overhaul_debug/baseline_inekf_after_gnss_lever_guard.log`: 2026-03-04 20:36:00
-  - `output/review/20260304-2016-code_overhaul_debug/gnss30_inekf_final.log`: 2026-03-04 20:37:26
-  - `output/review/20260304-2016-code_overhaul_debug/gnss30_eskf_nofreeze_final.log`: 2026-03-04 20:38:09
+  - N/A
 - config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04 14:25:04
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 15:08:24
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-  - `include/core/eskf.h`: 2026-03-04 20:32:50
-  - `src/core/ins_mech.cpp`: 2026-03-04 20:30:47
-  - `src/core/eskf_engine.cpp`: 2026-03-04 20:21:34
-  - `src/core/measurement_models_uwb.cpp`: 2026-03-04 20:35:05
-  - `src/app/pipeline_fusion.cpp`: 2026-03-04 20:26:07
+  - 基于 `20260306-1003-inekf-tex-code-audit-r1` 审查结论作决策
 - dataset_time_window:
-  - `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（编译成功，4 组回归日志均为本次会话生成，时间链一致且含 FEJ 初始化前置证据）
+  - N/A
+- result_freshness_check:
+  - pass（建议直接基于同会话最新源码审查结果）
 - observability_notes:
-  - 状态块 `21-30`：本次未启用显式 ablation；`gnss_lever` 相关线性化在 FEJ 路径加入“零初值保护”，避免无杠杆臂场景的虚假冻结退化。
-  - 调度窗口：baseline 为 GNSS 全程启用；GNSS30 在 `t=528799.876` 后关闭 GNSS，仅保留 IMU+NHC+ODO。
-  - 行为判定：baseline 精度对 ESKF 中性（neutral）；InEKF baseline 相对 ESKF 维持同量级（neutral）；GNSS30 下 InEKF 对历史结果显著改善（improved），但 3D 指标仍略劣于 ESKF（partial）。
+  - 若目标是“严格的 IEKF 可观性优势”，应把主目标限定为 Lie 核心 `kPos/kVel/kAtt` 及满足不变残差条件的量测通道；当前 `21-30` 外参/尺度块与 ODO/NHC 通道仍会通过当前 `C_bn/v/omega` 进入线性化，难以宣称“全 31 维无泄露”。
+  - 因此推荐主线转向“代码贴理论”：新实现真正的 Lie-core IEKF，并把现有混合实现保留为 baseline；当前实现只适合作为 `neutral` 对照，不适合作为最终“无可观性泄露 IEKF”口径。
 - decision:
-  - 在当前实现下，为满足“ESKF 回归误差 < 0.001m”的门禁，`F_rφ` 保持历史兼容（`0`）；相关耦合项作为后续受控开关实验处理。
-  - FEJ 初始化时序修复为“首次 GNSS 更新前”，并保留运行期可追踪日志（初始化时刻、`det(C_bn_fej)`、`||H_att||_F`）。
-  - GNSS H 冻结逻辑采用最小风险门控：仅在 `gnss_lever` 冻结点非零时启用冻结雅可比，防止零杠杆臂场景下不必要退化。
+  - 选择“代码贴文档/理论”作为主线更合适；同时短期应把文档显式注明当前实现只是 `RI-inspired hybrid ESKF`，避免研究结论混淆。
 - next_step:
-  - 用本次新 `SOL_*` 与日志重跑 `ISSUE-001` compare 产物并更新 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/`。
-  - 将 `F_rφ` 耦合项改为显式可控实验开关，做 A/B 对照并记录可观性与 RMSE 影响。
-  - 在 `head_ratio=0.30` 下继续开展 `odo_scale/mounting/lever` post-GNSS 组合冻结矩阵，补齐 consistency 汇总。
+  - 设计一个最小可验证的 true-IEKF 版本：先收缩到 Lie 核心 + GNSS_POS invariant residual，再逐步接回 Euclidean 扩展状态与 ODO/NHC。
 
-### session_id: 20260304-2104-inekf-rewrite-no-fej
+### session_id: 20260306-1128-true-iekf-refactor-and-compare-r1
 
-- timestamp: 2026-03-04 21:04 (local)
-- objective: 按 `代码大修2.md` 将 InEKF 与 FEJ 冻结机制解耦，并基于“误差优先”执行最小风险回归调试。
+- timestamp: 2026-03-06 11:28 (local)
+- objective: 按“代码贴理论”主线落地一个更接近文档推导的 `true_iekf` 分支，并与现有 hybrid RI 实现做 fresh 对比。
 - scope:
-  - `FejManager` 退化为 InEKF 开关（保留兼容类型别名，不再持有冻结状态）。
-  - 删除 pipeline 中 FEJ layer2 窗口与首次 GNSS FEJ 初始化生命周期。
-  - 删除 GNSS 位置/速度模型中的 FEJ 冻结雅可比分支，统一使用当前 `C_bn`。
-  - 过程模型保留 `InEKF F_vφ=-Skew(a_m_ned)`；对 `ESKF F_rφ` 进行 A/B，最终按误差回退为历史兼容 `0`。
-  - 更新 InEKF 配置注释，标注 `fej.enable` 仅为 InEKF 开关、其余字段 deprecated/no-op。
+  - 代码：在不破坏现有 hybrid 基线的前提下，引入 `true_iekf_mode`。
+  - 实验：data2/data4 × baseline/GNSS30 × hybrid/true 共 8 组 fresh 运行。
+  - 报告：输出研究报告与指标汇总。
 - changed_files:
-  - `include/core/eskf.h`
-  - `src/core/ins_mech.cpp`
-  - `src/core/measurement_models_uwb.cpp`
-  - `src/app/pipeline_fusion.cpp`
-  - `include/app/fusion.h`
-  - `src/app/config.cpp`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
-- commands:
-  - `cmake --build build --config Release`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_inekf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_eskf_nofreeze.yaml`
-- artifacts:
-  - `output/review/20260304-2104-inekf-rewrite/baseline_eskf_final.log`
-  - `output/review/20260304-2104-inekf-rewrite/baseline_inekf_ctrl_final.log`
-  - `output/review/20260304-2104-inekf-rewrite/gnss30_inekf_final.log`
-  - `output/review/20260304-2104-inekf-rewrite/gnss30_eskf_nofreeze_final.log`
-- metrics:
-  - baseline ESKF RMSE xyz / RMSE3D: `0.763591 0.565924 0.770052` / `1.223242`
-  - baseline InEKF RMSE xyz / RMSE3D: `0.763144 0.565423 0.769264` / `1.222235`
-  - GNSS30 InEKF RMSE xyz / RMSE3D: `89.206 100.587 142.126` / `195.640627`
-  - GNSS30 ESKF RMSE xyz / RMSE3D: `57.533 82.961 78.063` / `127.618202`
-  - compatibility delta（相对 `EXP-20260304-inekf-refactor-minrisk-debug`）:
-    - baseline ESKF: `Δxyz = [0, 0, 0]`
-    - baseline InEKF: `Δxyz = [-0.000116, -0.000069, -0.000133]`（轻微改善）
-    - GNSS30 ESKF: `Δxyz = [0, 0, 0]`
-    - GNSS30 InEKF: `Δxyz = [+39.311, +27.978, +39.659]`（显著劣化）
-- artifact_mtime:
-  - `output/review/20260304-2104-inekf-rewrite/baseline_eskf_final.log`: 2026-03-04 21:13:41
-  - `output/review/20260304-2104-inekf-rewrite/baseline_inekf_ctrl_final.log`: 2026-03-04 21:13:40
-  - `output/review/20260304-2104-inekf-rewrite/gnss30_inekf_final.log`: 2026-03-04 21:13:40
-  - `output/review/20260304-2104-inekf-rewrite/gnss30_eskf_nofreeze_final.log`: 2026-03-04 21:13:41
-- config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04 21:06:56
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 21:07:02
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-  - `include/core/eskf.h`: 2026-03-04 21:05:01
-  - `src/core/ins_mech.cpp`: 2026-03-04 21:12:35
-  - `src/core/measurement_models_uwb.cpp`: 2026-03-04 21:07:37
-  - `src/app/pipeline_fusion.cpp`: 2026-03-04 21:08:11
-  - `src/app/config.cpp`: 2026-03-04 21:06:51
-  - `include/app/fusion.h`: 2026-03-04 21:06:45
-- dataset_time_window:
-  - `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（构建成功，4 组最终日志均为本会话新生成且时间链一致）
-- observability_notes:
-  - 状态块 `21-30`：本次未启用显式 `fusion.ablation.*`；InEKF 改动主要影响 `kGnssLever` 与 `kLever` 相关雅可比线性化路径（由 FEJ 冻结切换为当前状态线性化）。
-  - 调度窗口：`fusion.gnss_schedule.head_ratio=0.30` 时，GNSS 在 `t=528799.876` 后关闭，仅保留 IMU + NHC + ODO 更新。
-  - 行为判定：baseline 阶段 InEKF 与 ESKF 均为中性（neutral）；GNSS30 阶段无 FEJ InEKF 明显劣化（degraded）。
-- decision:
-  - 接受“无 FEJ InEKF”结构性改造，并保留 `ESKF F_rφ=0` 的最小风险回退以避免绝对误差恶化。
-  - 将 `EXP-20260304-inekf-refactor-minrisk-debug` 标记为语义冲突历史参考（FEJ 依赖路径）。
-- next_step:
-  - 在无 FEJ 前提下继续调试 InEKF（优先检查 GNSS30 段 ODO/NHC 姿态耦合与 GNSS 速度模型一致性）。
-  - 重跑 `ISSUE-001` compare 汇总，更新 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/` 与冲突状态。
-
-### session_id: 20260304-2220-push-updated-code-to-github
-
-- timestamp: 2026-03-04 22:20 (local)
-- objective: 将当前本地更新后的代码与文档同步到 GitHub `origin/main`。
-- scope:
-  - 读取 `walkthrough.md` 并复用当前阶段上下文。
-  - 检查工作区变更、当前分支与远端配置。
-  - 提交当前修改并推送到 GitHub。
-- changed_files:
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
   - `include/app/fusion.h`
   - `include/core/eskf.h`
-  - `scripts/analysis/run_state_ablation.py`
   - `src/app/config.cpp`
-  - `src/app/diagnostics.cpp`
-  - `src/app/evaluation.cpp`
-  - `src/app/initialization.cpp`
   - `src/app/pipeline_fusion.cpp`
-  - `src/core/eskf_engine.cpp`
   - `src/core/ins_mech.cpp`
   - `src/core/measurement_models_uwb.cpp`
-  - `src/utils/math_utils.cpp`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-- commands:
-  - `git status --short`
-  - `git branch --show-current`
-  - `git remote -v`
-  - `git add config_data2_baseline_inekf_ctrl.yaml config_data2_gnss30_inekf.yaml include/app/fusion.h include/core/eskf.h scripts/analysis/run_state_ablation.py src/app/config.cpp src/app/diagnostics.cpp src/app/evaluation.cpp src/app/initialization.cpp src/app/pipeline_fusion.cpp src/core/eskf_engine.cpp src/core/ins_mech.cpp src/core/measurement_models_uwb.cpp src/utils/math_utils.cpp walkthrough.md`
-  - `git commit -m "chore: sync inekf rewrite updates and docs"`
-  - `git push origin main`
-- artifacts:
-  - Git commit: `69919da`（`chore: sync inekf rewrite updates and docs`）
-  - 远端更新: `origin/main` 从 `bc0f1b4` 前进到 `69919da`
-- metrics:
-  - N/A（本次任务为代码同步，不新增实验指标）
-- observability_notes:
-  - 本次未执行新实验；状态块 `21-30`、`fusion.ablation.*`、`fusion.post_gnss_ablation.*` 与调度窗口均未新增操作。
-- decision:
-  - 已完成本地到远端的版本同步；研究任务优先级保持不变，继续 `ISSUE-001` 与 GNSS30 可观性矩阵。
-- next_step:
-  - 推送完成后，按优先队列继续无 FEJ InEKF 退化定位与 compare 冲突清理。
-
-### session_id: 20260304-2312-inekf-ri-realization-codeoverhaul3
-
-- timestamp: 2026-03-04 23:12 (local)
-- objective: 按 `代码大修3.md` 将当前 InEKF 从“ESKF 套壳”改为真实 RI 实现，并完成最小闭环回归验证。
-- scope:
-  - 在 `FejManager/InEkfConfig` 增加 RI 原点 `p_init_ecef`，并在 `EskfEngine::Initialize` 记录初始化参考点。
-  - 在 `EskfEngine::InjectErrorState` 中加入 RI→加法误差逆变换（`δv, δp` 由 `ξ_v, ξ_p` 还原）。
-  - 将 `InsMech::BuildProcessModel` 的 InEKF `F_vφ` 改为 `Skew(g_ned)`。
-  - 更新 ODO/NHC/GNSS 位置/GNSS 速度四个量测模型的 InEKF 雅可比（含 ODO/NHC 姿态列解耦）。
-  - 关闭基于“ESKF/InEKF 姿态列必为相反数”的旧一致性强校验，并调整 `SetFejManager` 与 `Initialize` 调用顺序。
-  - 编译并回归 `baseline_eskf` / `baseline_inekf_ctrl` / `gnss30_inekf` / `gnss30_eskf_nofreeze`。
-- changed_files:
-  - `include/core/eskf.h`
   - `src/core/eskf_engine.cpp`
-  - `src/core/ins_mech.cpp`
-  - `src/core/measurement_models_uwb.cpp`
-  - `src/app/pipeline_fusion.cpp`
+  - `config_data2_baseline_true_iekf.yaml`
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_baseline_true_iekf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/20260306-true-iekf-refactor-r1/metrics_summary.csv`
+  - `output/review/20260306-true-iekf-refactor-r1/metrics_summary.json`
+  - `output/review/20260306-true-iekf-refactor-r1/summary.md`
+  - `.research/20260306-true-iekf-refactor-r1/polished_report.md`
   - `walkthrough.md`
 - configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
+  - hybrid: `config_data2_baseline_inekf_best.yaml`, `config_data2_gnss30_inekf_best.yaml`, `config_data4_baseline_inekf_best.yaml`, `config_data4_gnss30_inekf_best.yaml`
+  - true: `config_data2_baseline_true_iekf.yaml`, `config_data2_gnss30_true_iekf.yaml`, `config_data4_baseline_true_iekf.yaml`, `config_data4_gnss30_true_iekf.yaml`
 - commands:
-  - `cmake --build build --config Release`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_inekf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_eskf_nofreeze.yaml`
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `build/Release/eskf_fusion.exe --config config_data2_baseline_inekf_best.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data2_baseline_true_iekf.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data2_gnss30_inekf_best.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data2_gnss30_true_iekf.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data4_baseline_inekf_best.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data4_baseline_true_iekf.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data4_gnss30_inekf_best.yaml`
+  - `build/Release/eskf_fusion.exe --config config_data4_gnss30_true_iekf.yaml`
+  - `python` 提取 fresh log 中的 `RMSE3D` / `||H_att||_F` 统计并生成 `metrics_summary.*`
 - artifacts:
-  - `output/review/20260304-2312-inekf-ri-implementation/baseline_eskf.log`
-  - `output/review/20260304-2312-inekf-ri-implementation/baseline_inekf_ctrl.log`
-  - `output/review/20260304-2312-inekf-ri-implementation/gnss30_inekf.log`
-  - `output/review/20260304-2312-inekf-ri-implementation/gnss30_eskf_nofreeze.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data2_baseline_hybrid.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data2_baseline_true.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data2_gnss30_hybrid.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data2_gnss30_true.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data4_baseline_hybrid.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data4_baseline_true.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data4_gnss30_hybrid.log`
+  - `output/review/20260306-true-iekf-refactor-r1/data4_gnss30_true.log`
+  - `output/review/20260306-true-iekf-refactor-r1/metrics_summary.csv`
+  - `output/review/20260306-true-iekf-refactor-r1/summary.md`
+  - `.research/20260306-true-iekf-refactor-r1/polished_report.md`
 - metrics:
-  - baseline ESKF RMSE xyz / RMSE3D: `0.763591 0.565924 0.770052` / `1.223242`
-  - baseline InEKF RMSE xyz / RMSE3D: `0.953258 0.962653 1.014938` / `1.692779`
-  - GNSS30 InEKF RMSE xyz / RMSE3D: `40.557 89.686 66.555` / `118.819261`
-  - GNSS30 ESKF RMSE xyz / RMSE3D: `57.533 82.961 78.063` / `127.618202`
-  - 对比结论:
-    - ESKF baseline 与历史 `0.763591 0.565924 0.770052` 完全一致（回归通过）。
-    - GNSS30 InEKF 的 RMSE3D 从旧版 `195.641` 降至 `118.819`，并优于本轮 GNSS30 ESKF `127.618`。
-    - baseline InEKF 明显劣化（新增 `ISSUE-005`）。
+  - data2 baseline RMSE3D: hybrid/true `1.723701 / 1.228326`
+  - data2 GNSS30 RMSE3D: hybrid/true `88.890702 / 201.158876`
+  - data4 baseline RMSE3D: hybrid/true `0.876828 / 0.913143`
+  - data4 GNSS30 RMSE3D: hybrid/true `73.715425 / 115.499686`
+  - `GNSS_POS ||H_att||_F max`:
+    - data2 baseline `2354.037209 / 2.309982`
+    - data2 GNSS30 `2354.037209 / 1.801013`
+    - data4 baseline `3.592688 / 3.760363`
+    - data4 GNSS30 `3.076180 / 3.400609`
 - artifact_mtime:
-  - `output/review/20260304-2312-inekf-ri-implementation/baseline_eskf.log`: 2026-03-04 22:52:45
-  - `output/review/20260304-2312-inekf-ri-implementation/baseline_inekf_ctrl.log`: 2026-03-04 22:54:37
-  - `output/review/20260304-2312-inekf-ri-implementation/gnss30_inekf.log`: 2026-03-04 22:53:20
-  - `output/review/20260304-2312-inekf-ri-implementation/gnss30_eskf_nofreeze.log`: 2026-03-04 22:53:55
+  - `output/review/20260306-true-iekf-refactor-r1/metrics_summary.csv`: 2026-03-06
+  - `.research/20260306-true-iekf-refactor-r1/polished_report.md`: 2026-03-06
 - config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04 21:06:56
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 21:07:02
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-  - `include/core/eskf.h`: 2026-03-04 22:49:55
-  - `src/core/eskf_engine.cpp`: 2026-03-04 22:50:07
-  - `src/core/ins_mech.cpp`: 2026-03-04 22:50:17
-  - `src/core/measurement_models_uwb.cpp`: 2026-03-04 22:50:40
-  - `src/app/pipeline_fusion.cpp`: 2026-03-04 22:50:48
+  - true 配置由对应 `*_inekf_best.yaml` fresh 派生，并显式加入 `fusion.fej.true_iekf_mode: true`
 - dataset_time_window:
-  - `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（构建成功，4 组日志均为本会话生成且时间链一致；冲突项单列到 `ISSUE-005`）
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（8 组运行、日志与汇总均在本会话 fresh 生成）
 - observability_notes:
-  - 状态块 `21-30`：本次未启用 `fusion.ablation.*` 与 `fusion.post_gnss_ablation.*`；外参与尺度状态仍由 ODO/NHC/GNSS 量测驱动。
-  - RI 量测改动映射：
-    - ODO/NHC 在 InEKF 下将 `StateIdx::kAtt` 列解耦置零（速度类约束不再直接线性耦合姿态误差）。
-    - GNSS 位置模型在 InEKF 下引入 `p_ned_local` 项，姿态列范数在基线中显著增大（见日志 `||H_att||_F`）。
-    - GNSS 速度模型在 InEKF 下加入 `-Skew(v_ned)` 项。
-  - 调度窗口：
-    - baseline：GNSS 全程可用。
-    - GNSS30：`fusion.gnss_schedule.enabled=true`，`head_ratio=0.30`，`split_t=528799.875306`。
-  - 行为判定：
-    - baseline：ESKF 中性（neutral），InEKF 劣化（degraded）。
-    - GNSS30：InEKF 相比旧版显著改善（improved），且本轮优于 ESKF（improved）。
+  - 状态块 `kPos/kVel/kAtt`：`true_iekf` 将 Lie 核心改为更接近 body-frame invariant 语义；在 GNSS 全程窗口（data2 baseline）表现 improved，且 `GNSS_POS` 姿态列范数从 `2354` 压到 `2.31`。
+  - 状态块 `21-30`：仍按 Euclidean/hybrid 方式与 ODO/NHC、GNSS_VEL 耦合；在 post-GNSS 稀疏窗口（data2/data4 GNSS30）整体表现 degraded，说明非不变通道与扩展块成为新的主误差源。
+  - 传感器窗口：GNSS 连续可用时，true Lie-core 改造收益明显；GNSS30 稀疏窗口下，ODO/NHC/GNSS_VEL 主导阶段 true 分支尚未闭环。
+  - 本会话未改动 `fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*`、`fusion.uwb_anchor_schedule.*` 逻辑，只在既有 baseline/GNSS30 窗口下比较 hybrid vs true。
 - decision:
-  - 接受 `代码大修3` 的结构性改造，确认当前 InEKF 已不再是“单纯符号翻转”。
-  - 将 `EXP-20260304-inekf-ri-realization-codeoverhaul3` 设为当前参考实现，同时将 baseline InEKF 回归问题登记为 `ISSUE-005` 并提升优先级。
-  - 保留旧版“姿态列符号相反”一致性检查为停用状态，避免误报阻断运行。
+  - `true_iekf` 主线代码已可运行，且明确修复了 data2 中 `GNSS_POS` 姿态列的结构性放大问题。
+  - 但当前版本只能称为“Lie 核心更接近理论”的 phase-1 结果；在 sparse-GNSS 场景，ODE/NHC、GNSS_VEL 与 `21-30` 扩展块仍需继续代码贴理论改造。
 - next_step:
-  - 对 `ISSUE-005` 做 A/B 定位（优先切换 GNSS 位置 `p_ned_local` 项与注入逆变换项，确认 baseline 回归根因）。
-  - 重跑 `ISSUE-001` compare 汇总，更新 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/`。
-  - 在 `head_ratio=0.30` 下继续执行 post-GNSS 组合冻结矩阵，验证 RI 实现下状态块 `21-30` 的可观性趋势。
+  - 对 `true_iekf` 做 GNSS_VEL / ODO / NHC 消融矩阵，定位 GNSS30 退化主因，再继续推进 full-hybrid true IEKF 的第二阶段重构。
 
-### session_id: 20260304-2303-push-inekf-ri-github
+### session_id: 20260306-1349-true-iekf-gnss30-ablation-r1
 
-- timestamp: 2026-03-04 23:03 (local)
-- objective: 将 `代码大修3` 的 InEKF RI 实现改动上传到 GitHub `origin/main`。
+- timestamp: 2026-03-06 13:49 (local)
+- objective: 在 `true_iekf` 的 GNSS30 场景下，通过 `GNSS_VEL / ODO / NHC` 消融矩阵定位 sparse-GNSS 退化主因。
 - scope:
-  - 读取 `walkthrough.md` 并复用当前阶段上下文。
-  - 检查分支与远端状态，提交工作区改动并推送远端。
+  - 新增 `fusion.enable_gnss_velocity` 开关。
+  - 仅在 `data2/data4` 的 `GNSS30 + true_iekf` 场景下做 targeted ablation。
+- changed_files:
+  - `include/app/fusion.h`
+  - `src/app/config.cpp`
+  - `src/app/pipeline_fusion.cpp`
+  - `output/review/20260306-true-iekf-ablation-r1/cfg_*.yaml`
+  - `output/review/20260306-true-iekf-ablation-r1/ablation_metrics.csv`
+  - `output/review/20260306-true-iekf-ablation-r1/ablation_summary.json`
+  - `output/review/20260306-true-iekf-ablation-r1/summary.md`
+  - `.research/20260306-true-iekf-refactor-r1/polished_report.md`
+  - `walkthrough.md`
+- configs:
+  - `output/review/20260306-true-iekf-ablation-r1/cfg_data2_gnss30_{full,no_gnss_vel,no_odo,no_nhc,no_odo_nhc}.yaml`
+  - `output/review/20260306-true-iekf-ablation-r1/cfg_data4_gnss30_{full,no_gnss_vel,no_odo,no_nhc,no_odo_nhc}.yaml`
+- commands:
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `build/Release/eskf_fusion.exe --config output/review/20260306-true-iekf-ablation-r1/cfg_*.yaml`（10 组）
+  - `python` 提取 fresh log 中的 `RMSE3D` / `||H_att||_F` 统计并生成 `ablation_metrics.*`
+- artifacts:
+  - `output/review/20260306-true-iekf-ablation-r1/ablation_metrics.csv`
+  - `output/review/20260306-true-iekf-ablation-r1/ablation_summary.json`
+  - `output/review/20260306-true-iekf-ablation-r1/summary.md`
+  - `output/review/20260306-true-iekf-ablation-r1/cfg_*.log`
+- metrics:
+  - data2 GNSS30 full/no_gnss_vel/no_odo/no_nhc/no_odo_nhc RMSE3D:
+    `201.158876 / 201.158876 / 370.355380 / 716.565952 / 4938.740955`
+  - data4 GNSS30 full/no_gnss_vel/no_odo/no_nhc/no_odo_nhc RMSE3D:
+    `115.499686 / 121.404109 / 669.763471 / 784.539644 / 4524.530626`
+- artifact_mtime:
+  - `output/review/20260306-true-iekf-ablation-r1/ablation_metrics.csv`: 2026-03-06
+  - `output/review/20260306-true-iekf-ablation-r1/summary.md`: 2026-03-06
+- config_hash_or_mtime:
+  - ablation configs 均由对应 `*_gnss30_true_iekf.yaml` fresh 派生，仅修改 `enable_gnss_velocity` 与 `constraints.enable_odo/enable_nhc`
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（10 组消融日志与汇总均在本会话 fresh 生成）
+- observability_notes:
+  - GNSS30 稀疏窗口下，关闭 `GNSS_VEL` 对 data2 无影响、对 data4 轻微 degraded，说明 `GNSS_VEL` 不是主要 blocker。
+  - 关闭 `ODO` 或 `NHC` 均显著 degraded，关闭两者则灾难性 degraded；说明 road-constraint 通道是必要支撑，而非主要污染源本身。
+  - 因此 `true_iekf` 当前 sparse-GNSS 问题已从 `GNSS_POS` 核心 Jacobian 迁移到 `ODO/NHC` 与 `21-30` 扩展块的 hybrid Jacobian/reset 耦合一致性。
+- decision:
+  - 优先级上，将 `GNSS_VEL` 从嫌疑主因降级；下一阶段应优先重推 `ODO/NHC` 与 full-state reset Jacobian。
+- next_step:
+  - 进入 phase-2：对 `ODO/NHC` 与 `21-30` 扩展块执行“代码贴理论”的第二阶段重构，并复测 GNSS30。
+
+### session_id: 20260306-1600-github-sync-current-work
+
+- timestamp: 2026-03-06 16:00 (local)
+- objective: 将当前工作区中的代码与配置改动同步到 GitHub 远程仓库。
+- scope:
+  - 检查本地分支、远程地址、工作树与暂存状态。
+  - 按当前工作树状态提交并推送到 `origin/main`。
 - changed_files:
   - `walkthrough.md`
 - configs:
-  - N/A（本次为代码同步任务）
+  - N/A（仓库同步任务，无算法配置变更）
 - commands:
   - `git status --short`
-  - `git branch --show-current`
   - `git remote -v`
-  - `git add include/core/eskf.h src/core/eskf_engine.cpp src/core/ins_mech.cpp src/core/measurement_models_uwb.cpp src/app/pipeline_fusion.cpp walkthrough.md`
-  - `git commit -m "feat: implement right-invariant inekf per overhaul3"`
+  - `git add -A`
+  - `git commit -m "feat: add true-iekf mode and related configs"`
   - `git push origin main`
 - artifacts:
-  - Git commit: `9592676`（`feat: implement right-invariant inekf per overhaul3`）
-  - 远端更新: `origin/main` 从 `873b39f` 前进到 `9592676`
+  - Git commit（本地）
+  - GitHub `origin/main`（远程）
 - metrics:
-  - N/A（本次任务未新增实验运行）
-- observability_notes:
-  - 本次未新增量测/调度/消融实验；状态块 `21-30`、`fusion.ablation.*`、`fusion.post_gnss_ablation.*` 与调度窗口未发生新实验层变更。
-- decision:
-  - `代码大修3` 的实现已完成版本化并同步到 GitHub。
-- next_step:
-  - 按优先队列继续 `ISSUE-005` baseline InEKF 回归定位与 `ISSUE-001` compare 冲突清理。
-
-### session_id: 20260304-2318-fix-inekf-gvel-gyro-noise-map
-
-- timestamp: 2026-03-04 23:18 (local)
-- objective: 按 `ISSUE-005` 假设修复 InEKF 过程噪声映射，补充 `G(kVel,gyro)` 的 RI 耦合项并验证效果。
-- scope:
-  - 在 `InsMech::BuildProcessModel` 的 InEKF 分支新增 `G.block<3,3>(kVel,3) = -Skew(v_ned) * C_bn`。
-  - 编译并回归 `baseline_eskf` / `baseline_inekf_ctrl` / `gnss30_inekf` / `gnss30_eskf_nofreeze`。
-- changed_files:
-  - `src/core/ins_mech.cpp`
-  - `walkthrough.md`
-- configs:
-  - `config_data2_baseline_eskf.yaml`
-  - `config_data2_baseline_inekf_ctrl.yaml`
-  - `config_data2_gnss30_inekf.yaml`
-  - `config_data2_gnss30_eskf_nofreeze.yaml`
-- commands:
-  - `cmake --build build --config Release`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_eskf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_baseline_inekf_ctrl.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_inekf.yaml`
-  - `.\build\Release\eskf_fusion.exe --config config_data2_gnss30_eskf_nofreeze.yaml`
-- artifacts:
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_eskf.log`
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_inekf_ctrl.log`
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_inekf.log`
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_eskf_nofreeze.log`
-- metrics:
-  - baseline ESKF RMSE xyz / RMSE3D: `0.763591 0.565924 0.770052` / `1.223242`
-  - baseline InEKF RMSE xyz / RMSE3D: `1.044499 1.277957 1.263830` / `2.078802`
-  - GNSS30 InEKF RMSE xyz / RMSE3D: `47.471 96.176 126.611` / `165.932710`
-  - GNSS30 ESKF RMSE xyz / RMSE3D: `57.533 82.961 78.063` / `127.618202`
-  - 对比 `EXP-20260304-inekf-ri-realization-codeoverhaul3`:
-    - baseline InEKF: `1.692779 -> 2.078802`（劣化）
-    - GNSS30 InEKF: `118.819261 -> 165.932710`（劣化）
+  - N/A（本会话未新增解算实验）
 - artifact_mtime:
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_eskf.log`: 2026-03-04 23:27:10
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/baseline_inekf_ctrl.log`: 2026-03-04 23:27:45
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_inekf.log`: 2026-03-04 23:28:20
-  - `output/review/20260304-2318-inekf-ri-gvelgyro-fix/gnss30_eskf_nofreeze.log`: 2026-03-04 23:28:55
+  - `walkthrough.md`: 2026-03-06
 - config_hash_or_mtime:
-  - `config_data2_baseline_eskf.yaml`: 2026-03-04 14:24:58
-  - `config_data2_baseline_inekf_ctrl.yaml`: 2026-03-04 21:06:56
-  - `config_data2_gnss30_inekf.yaml`: 2026-03-04 21:07:02
-  - `config_data2_gnss30_eskf_nofreeze.yaml`: 2026-03-04 15:20:46
-  - `src/core/ins_mech.cpp`: 2026-03-04 23:26:12
+  - N/A
 - dataset_time_window:
-  - `528076.009368` 到 `530488.900000`
-- result_freshness_check: pass（构建成功，4 组日志均为本会话生成且时间链一致）
+  - N/A
+- result_freshness_check:
+  - pass（同步动作在本会话内完成）
 - observability_notes:
-  - 状态块 `21-30`：本次未启用 `fusion.ablation.*` 或 `fusion.post_gnss_ablation.*`；外参相关更新机制未改动。
-  - 调度窗口：
-    - baseline：GNSS 全程更新。
-    - GNSS30：`fusion.gnss_schedule.enabled=true`，`head_ratio=0.30`，后段仅 IMU+NHC+ODO。
-  - 行为判定：
-    - baseline：InEKF 相对 ESKF 继续劣化（degraded）。
-    - GNSS30：InEKF 从上一轮“优于 ESKF”退化为“劣于 ESKF”（degraded）。
+  - 本次为代码托管同步，无新增状态块冻结/消融实验。
+  - `fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*`、`fusion.uwb_anchor_schedule.*` 未改动。
 - decision:
-  - 已落地“补 `G(kVel,gyro)`”改动，但证据显示其单独引入不能修复 `ISSUE-005`，且导致性能进一步恶化。
-  - 将“仅补该项即可修复”的假设标记为 rejected，后续按系统一致性继续 A/B。
+  - 当前改动以单次提交形式同步至远程，后续 phase-2 继续在新提交基础上推进。
 - next_step:
-  - 做符号与结构 A/B：`-Skew(v_ned)C_bn` / `+Skew(v_ned)C_bn` / 不启用，比较 baseline 与 GNSS30 双场景。
-  - 检查 RI 下 `ξ_p` 相关过程噪声映射是否遗漏，并与量测噪声约定联合验证。
-
-### session_id: 20260304-2336-push-inekf-gvelgyro-fix
-
-- timestamp: 2026-03-04 23:36 (local)
-- objective: 将 `G(kVel,gyro)` RI 耦合修复版本推送到 GitHub `origin/main`。
-- scope:
-  - 检查当前工作区与分支状态。
-  - 提交 `ins_mech.cpp + walkthrough.md` 并推送远端。
-- changed_files:
-  - `walkthrough.md`
-- configs:
-  - N/A（本次为代码同步任务）
-- commands:
-  - `git add src/core/ins_mech.cpp walkthrough.md`
-  - `git commit -m "fix: add ri velocity-gyro noise coupling"`
-  - `git push origin main`
-- artifacts:
-  - Git commit: `cff7537`（`fix: add ri velocity-gyro noise coupling`）
-  - 远端更新: `origin/main` 从 `67caa4f` 前进到 `cff7537`
-- metrics:
-  - N/A（本次任务未新增实验运行）
-- observability_notes:
-  - 本次未新增实验；状态块 `21-30` 与调度窗口行为引用上一个会话（`20260304-2318-fix-inekf-gvel-gyro-noise-map`）结论。
-- decision:
-  - 已完成当前修复版本的远端同步，可继续开展 `ISSUE-005/006` A/B 调试。
-- next_step:
-  - 基于远端 `cff7537` 继续执行 `G(kVel,gyro)` 符号/开关 A/B 与 RI 量测耦合联合验证。
+  - 基于已同步版本继续实现 `true_iekf` phase-2（`ODO/NHC` 与 `21-30` 扩展块 Jacobian/reset 重构）。
 
 ## 下一步（优先队列）
 
-1. 处理 `ISSUE-005/006`：对 `G(kVel,gyro)` 做符号与开关 A/B（`-Skew(v)C_bn`、`+Skew(v)C_bn`、disabled），在 baseline+GNSS30 双场景找出一致改进方向。
-2. 在上一步最优变体上，再做 `p_ned_local` 量测耦合项与 RI 注入逆变换的联合 A/B，定位主导退化源。
-3. 重跑 `ISSUE-001` 对应 compare，使用最新 baseline 产物重生 `output/compare_data2_baseline_eskf_vs_inekf_ctrl/` 并关闭冲突。
-4. 在 `head_ratio=0.30` 下执行 `odo_scale/mounting/lever` post-GNSS 组合冻结矩阵，记录状态块 `21-30` 的可观性变化。
-5. 在 GNSS30 对比中补齐 consistency 统计（`accept_ratio`, `nis_mean`, `nis_max`）并纳入汇总。
-6. 为关键健壮性回归补自动化脚本用例：`missing_truth_manual_init`、`invalid_gnss`、`max_dt=0`。
+1. 基于本次已同步版本进入 `true_iekf` phase-2：显式重推 `ODO/NHC` 与 `21-30` 扩展块在 true 核心坐标下的 Jacobian/Reset。
+2. phase-2 完成后复查 `GNSS_VEL` 是否仍需专门处理；当前证据显示它不是首要 blocker。
+3. 修正文档口径：把当前 hybrid 分支与新的 `true_iekf` 分支分章写清，避免实验口径混写。
+4. 完成 data4 GNSS30 退化机理说明，并决定是否将最佳冻结策略 `s0m1l1` 写入最终结论。
+5. 明确 GNSS 速度噪声敏感性在报告中的风险说明范围（主口径保持 `GNSS_converted.txt`）。

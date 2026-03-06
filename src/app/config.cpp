@@ -527,6 +527,9 @@ FejConfig ApplyFejNode(const FejConfig &base, const YAML::Node &node,
   if (node["enable"]) {
     out.enable = node["enable"].as<bool>();
   }
+  if (node["true_iekf_mode"]) {
+    out.true_iekf_mode = node["true_iekf_mode"].as<bool>();
+  }
   if (node["enable_layer2"]) {
     out.enable_layer2 = node["enable_layer2"].as<bool>();
   }
@@ -538,6 +541,16 @@ FejConfig ApplyFejNode(const FejConfig &base, const YAML::Node &node,
   }
   if (node["accel_threshold"]) {
     out.accel_threshold = node["accel_threshold"].as<double>();
+  }
+  if (node["ri_gnss_pos_use_p_ned_local"]) {
+    out.ri_gnss_pos_use_p_ned_local =
+        node["ri_gnss_pos_use_p_ned_local"].as<bool>();
+  }
+  if (node["ri_vel_gyro_noise_mode"]) {
+    out.ri_vel_gyro_noise_mode = node["ri_vel_gyro_noise_mode"].as<int>();
+  }
+  if (node["ri_inject_pos_inverse"]) {
+    out.ri_inject_pos_inverse = node["ri_inject_pos_inverse"].as<bool>();
   }
   return out;
 }
@@ -709,6 +722,12 @@ void ValidateFejConfig(const FejConfig &config, const string &context) {
       !std::isfinite(config.accel_threshold)) {
     ThrowConfigError("error: " + context +
                      ".fej.omega_threshold/accel_threshold 必须为有限数值");
+  }
+  if (config.ri_vel_gyro_noise_mode != -1 &&
+      config.ri_vel_gyro_noise_mode != 0 &&
+      config.ri_vel_gyro_noise_mode != 1) {
+    ThrowConfigError("error: " + context +
+                     ".fej.ri_vel_gyro_noise_mode 仅支持 -1/0/1");
   }
 }
 
@@ -991,6 +1010,9 @@ FusionOptions LoadFusionOptions(const string &path) {
   opt.pos_path = f["pos_path"] ? f["pos_path"].as<string>() : opt.pos_path;
   opt.odo_path = f["odo_path"] ? f["odo_path"].as<string>() : opt.odo_path;
   opt.gnss_path = f["gnss_path"] ? f["gnss_path"].as<string>() : opt.gnss_path;
+  opt.enable_gnss_velocity = f["enable_gnss_velocity"]
+                                 ? f["enable_gnss_velocity"].as<bool>()
+                                 : opt.enable_gnss_velocity;
   opt.output_path =
       f["output_path"] ? f["output_path"].as<string>() : opt.output_path;
   opt.start_time = f["starttime"] ? f["starttime"].as<double>() : opt.start_time;

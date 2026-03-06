@@ -152,6 +152,8 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
                                 Matrix<double, kStateDim, kStateDim> &Qd,
                                 const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
+  bool use_true_iekf = (fej != nullptr && fej->UseTrueInEkfMode());
+  bool use_hybrid_inekf = use_inekf && !use_true_iekf;
 
   // 防御性检查：sigma 置零合法，但不允许 NaN/Inf。
   assert(std::isfinite(np.sigma_sg));
@@ -261,6 +263,27 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   Matrix3d diag_wib = omega_ib_b.asDiagonal();
   F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -C_bn * diag_wib;
 
+  if (use_true_iekf) {
+    Matrix3d neg_skew_omega = -Skew(omega_ib_b);
+    Matrix3d diag_fb_body = f_b.asDiagonal();
+
+    F.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = neg_skew_omega;
+    F.block<3, 3>(StateIdx::kPos, StateIdx::kVel) = Matrix3d::Identity();
+    F.block<3, 3>(StateIdx::kPos, StateIdx::kAtt).setZero();
+
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kPos).setZero();
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = neg_skew_omega;
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = -Skew(f_b);
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -Matrix3d::Identity();
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kSa) = -diag_fb_body;
+
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kPos).setZero();
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kVel).setZero();
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = neg_skew_omega;
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -Matrix3d::Identity();
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -diag_wib;
+  }
+
   // === IMU误差（马尔可夫模型）===
   double T = np.markov_corr_time;
   if (T > 0.0) {
@@ -293,10 +316,23 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   G.block<3, 3>(StateIdx::kVel, 0) = -C_bn;       // acc noise → velocity
   // 姿态误差 φ 在 NED 系，陀螺白噪声在 body 系，需经 C_b^n 映射。
   G.block<3, 3>(StateIdx::kAtt, 3) = -C_bn;      // gyro noise → attitude
-  if (use_inekf) {
+  if (use_hybrid_inekf) {
     // RI-EKF: ξ_v = δv + (v^n ×)ξ_φ
-    // 陀螺白噪声经姿态误差耦合后还会直接驱动 ξ_v。
-    G.block<3, 3>(StateIdx::kVel, 3) = -Skew(v_ned) * C_bn;
+    // 通过配置支持 A/B：-1(默认) / 0(关闭) / +1(正号)。
+    int mode = -1;
+    if (fej != nullptr) {
+      mode = fej->ri_vel_gyro_noise_mode;
+    }
+    if (mode == -1) {
+      G.block<3, 3>(StateIdx::kVel, 3) = -Skew(v_ned) * C_bn;
+    } else if (mode == 1) {
+      G.block<3, 3>(StateIdx::kVel, 3) = Skew(v_ned) * C_bn;
+    }
+  }
+  if (use_true_iekf) {
+    G.block<3, 3>(StateIdx::kVel, 0) = -Matrix3d::Identity();
+    G.block<3, 3>(StateIdx::kAtt, 3) = -Matrix3d::Identity();
+    G.block<3, 3>(StateIdx::kVel, 3).setZero();
   }
   G.block<3, 3>(StateIdx::kBa, 6) = Matrix3d::Identity();   // ba process noise
   G.block<3, 3>(StateIdx::kBg, 9) = Matrix3d::Identity();   // bg process noise
