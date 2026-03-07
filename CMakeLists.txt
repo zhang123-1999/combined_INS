@@ -62,3 +62,6 @@ target_link_libraries(uwb_generator PRIVATE uwb_app)
 
 add_executable(data_converter apps/data_converter_main.cpp)
 target_link_libraries(data_converter PRIVATE uwb_utils Eigen3::Eigen)
+
+add_executable(jacobian_audit apps/jacobian_audit_main.cpp)
+target_link_libraries(jacobian_audit PRIVATE uwb_app)

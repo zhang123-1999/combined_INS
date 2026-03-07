@@ -328,6 +328,9 @@ StateMask BuildStateMask(const StateAblationConfig &cfg) {
       mask[start + i] = false;
     }
   };
+  if (cfg.disable_gyro_bias) {
+    disable_range(StateIdx::kBg, 3);
+  }
   if (cfg.disable_gyro_scale) {
     disable_range(StateIdx::kSg, 3);
   }
@@ -358,6 +361,8 @@ StateAblationConfig MergeAblationConfig(const StateAblationConfig &base,
       out.disable_odo_lever_arm || extra.disable_odo_lever_arm;
   out.disable_odo_scale =
       out.disable_odo_scale || extra.disable_odo_scale;
+  out.disable_gyro_bias =
+      out.disable_gyro_bias || extra.disable_gyro_bias;
   out.disable_gyro_scale =
       out.disable_gyro_scale || extra.disable_gyro_scale;
   out.disable_accel_scale =
@@ -368,6 +373,9 @@ StateAblationConfig MergeAblationConfig(const StateAblationConfig &base,
 }
 
 void ApplyAblationToNoise(NoiseParams &noise, const StateAblationConfig &cfg) {
+  if (cfg.disable_gyro_bias) {
+    noise.sigma_bg = 0.0;
+  }
   if (cfg.disable_gyro_scale) {
     noise.sigma_sg = 0.0;
   }
@@ -1159,6 +1167,7 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
        << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
        << " odo_lever=" << (active_ablation.disable_odo_lever_arm ? "OFF" : "ON")
        << " odo_scale=" << (active_ablation.disable_odo_scale ? "OFF" : "ON")
+       << " gyro_bias=" << (active_ablation.disable_gyro_bias ? "OFF" : "ON")
        << " gyro_scale=" << (active_ablation.disable_gyro_scale ? "OFF" : "ON")
        << " accel_scale=" << (active_ablation.disable_accel_scale ? "OFF" : "ON")
        << " mounting=" << (active_ablation.disable_mounting ? "OFF" : "ON")
@@ -1276,6 +1285,7 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
              << " | gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
              << " odo_lever=" << (active_ablation.disable_odo_lever_arm ? "OFF" : "ON")
              << " odo_scale=" << (active_ablation.disable_odo_scale ? "OFF" : "ON")
+             << " gyro_bias=" << (active_ablation.disable_gyro_bias ? "OFF" : "ON")
              << " mounting=" << (active_ablation.disable_mounting ? "OFF" : "ON")
              << "\n";
       } else {

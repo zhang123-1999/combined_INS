@@ -577,6 +577,9 @@ StateAblationConfig ApplyAblationNode(const StateAblationConfig &base,
   if (node["disable_odo_scale"]) {
     out.disable_odo_scale = node["disable_odo_scale"].as<bool>();
   }
+  if (node["disable_gyro_bias"]) {
+    out.disable_gyro_bias = node["disable_gyro_bias"].as<bool>();
+  }
   if (node["disable_gyro_scale"]) {
     out.disable_gyro_scale = node["disable_gyro_scale"].as<bool>();
   }

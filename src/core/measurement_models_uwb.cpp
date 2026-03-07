@@ -118,10 +118,11 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   Vector3d omega_ie_n = OmegaIeNed(llh.lat);
   Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_in_b = C_bn.transpose() * omega_in_n;
   Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
   Vector3d sf_g = Vector3d::Ones() - state.sg;
   Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
-  Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
+  Vector3d omega_nb_b = omega_ib_corr - omega_in_b;
 
   const Vector3d &lever_arm = state.lever_arm;
   Vector3d v_wheel_b = v_b + omega_nb_b.cross(lever_arm);
@@ -133,16 +134,23 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
 
   model.H.setZero(2, kStateDim);
 
-  // H_v = C_b^v * C_n^b
-  Matrix3d H_v = C_b_v * C_bn.transpose();
-
+  Matrix3d H_v = Matrix3d::Zero();
   Matrix3d H_theta = Matrix3d::Zero();
-  if (use_hybrid_inekf) {
-    // RI 坐标下速度类约束与姿态误差解耦
-    H_theta.setZero();
+  if (use_true_iekf) {
+    // phase-2: 直接在 true Lie-core 坐标 (rho_v^b, phi^b) 下线性化，
+    // 不再先构造加法误差雅可比再做坐标变换。
+    H_v = C_b_v;
+    H_theta = C_b_v * Skew(v_b);
   } else {
-    // 标准 ESKF
-    H_theta = -C_b_v * Skew(v_b) * C_bn.transpose();
+    // H_v = C_b^v * C_n^b
+    H_v = C_b_v * C_bn.transpose();
+    if (use_hybrid_inekf) {
+      // RI 坐标下速度类约束与姿态误差解耦
+      H_theta.setZero();
+    } else {
+      // 标准 ESKF
+      H_theta = -C_b_v * Skew(v_b) * C_bn.transpose();
+    }
   }
 
   // H_bg = C_b^v * Skew(l) * diag(1-sg)
@@ -178,13 +186,14 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
   // 注：仅当 lever_arm.norm() > 0.05m 时该项才有显著影响
   if (!use_hybrid_inekf && lever_arm.norm() > 1e-3) {
-    Matrix3d H_theta_lever =
-        -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
+    Matrix3d H_theta_lever = Matrix3d::Zero();
+    if (use_true_iekf) {
+      H_theta_lever = C_b_v * Skew(lever_arm) * Skew(omega_in_b);
+    } else {
+      H_theta_lever =
+          -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
+    }
     model.H.block<2, 3>(0, StateIdx::kAtt) += H_theta_lever.block<2, 3>(1, 0);
-  }
-
-  if (use_true_iekf) {
-    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
   }
 
   model.R = Matrix2d::Zero();
@@ -217,10 +226,11 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   Vector3d omega_ie_n = OmegaIeNed(llh.lat);
   Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_in_b = C_bn.transpose() * omega_in_n;
   Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
   Vector3d sf_g = Vector3d::Ones() - state.sg;
   Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
-  Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
+  Vector3d omega_nb_b = omega_ib_corr - omega_in_b;
 
   const Vector3d &lever_arm = state.lever_arm;
   Vector3d v_wheel_b = v_b + omega_nb_b.cross(lever_arm);
@@ -237,16 +247,34 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   double s = state.odo_scale;
 
   // 1. H_v
-  RowVector3d H_v_phys = (C_b_v * C_bn.transpose()).row(0);
+  RowVector3d H_v_phys = RowVector3d::Zero();
+  if (use_true_iekf) {
+    H_v_phys = C_b_v.row(0);
+  } else {
+    H_v_phys = (C_b_v * C_bn.transpose()).row(0);
+  }
   model.H.block<1, 3>(0, StateIdx::kVel) = s * H_v_phys;
 
   Matrix3d H_theta_full = Matrix3d::Zero();
-  if (use_hybrid_inekf) {
-    // RI 坐标下，速度类约束的姿态列解耦
-    H_theta_full.setZero();
+  if (use_true_iekf) {
+    // phase-2: 直接在 true Lie-core 坐标 (rho_v^b, phi^b) 下线性化。
+    H_theta_full = C_b_v * Skew(v_b);
   } else {
-    // 标准 ESKF
-    H_theta_full = -C_b_v * Skew(v_b) * C_bn.transpose();
+    if (use_hybrid_inekf) {
+      // RI 坐标下，速度类约束的姿态列解耦
+      H_theta_full.setZero();
+    } else {
+      // 标准 ESKF
+      H_theta_full = -C_b_v * Skew(v_b) * C_bn.transpose();
+    }
+  }
+  if (!use_hybrid_inekf && lever_arm.norm() > 1e-3) {
+    if (use_true_iekf) {
+      H_theta_full += C_b_v * Skew(lever_arm) * Skew(omega_in_b);
+    } else {
+      H_theta_full +=
+          -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
+    }
   }
   model.H.block<1, 3>(0, StateIdx::kAtt) = s * H_theta_full.row(0);
 
@@ -280,10 +308,6 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   model.R.resize(1, 1);
   model.R(0, 0) = sigma_odo * sigma_odo;
 
-  if (use_true_iekf) {
-    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
-  }
-
   return model;
 }
 
@@ -313,8 +337,8 @@ UwbModel ComputeGnssPositionModel(const State &state, const Vector3d &z_ecef,
     model.H.block<3, 3>(0, StateIdx::kAtt) = -Skew(state.gnss_lever_arm);
     model.H.block<3, 3>(0, StateIdx::kGnssLever) = Matrix3d::Identity();
 
-    Matrix3d R_ecef = (sigma_gnss.cwiseProduct(sigma_gnss)).asDiagonal();
-    model.R = C_bn.transpose() * R_ne.transpose() * R_ecef * R_ne * C_bn;
+    Matrix3d R_ned = (sigma_gnss.cwiseProduct(sigma_gnss)).asDiagonal();
+    model.R = C_bn.transpose() * R_ned * C_bn;
     return model;
   }
 

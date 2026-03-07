@@ -157,6 +157,7 @@ struct StateAblationConfig {
   bool disable_gnss_lever_arm = false;  // x[28:30]
   bool disable_odo_lever_arm = false;   // x[25:27]
   bool disable_odo_scale = false;       // x[21]
+  bool disable_gyro_bias = false;       // x[12:14]
   bool disable_gyro_scale = false;      // x[15:17]
   bool disable_accel_scale = false;     // x[18:20]
   bool disable_mounting = false;        // x[22:24]

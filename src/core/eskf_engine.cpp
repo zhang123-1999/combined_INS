@@ -339,11 +339,17 @@ void EskfEngine::UpdateCovarianceJoseph(const MatrixXd &K, const MatrixXd &H,
 void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
   Matrix<double, kStateDim, kStateDim> Gamma =
       Matrix<double, kStateDim, kStateDim>::Identity();
+  Vector3d rho_p_body = dx.segment<3>(StateIdx::kPos);
+  Vector3d rho_v_body = dx.segment<3>(StateIdx::kVel);
   Vector3d phi_body = dx.segment<3>(StateIdx::kAtt);
   Matrix3d core_reset = QuatToRot(QuatFromSmallAngle(-phi_body));
   Gamma.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = core_reset;
   Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = core_reset;
   Gamma.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kPos, StateIdx::kAtt) =
+      -Skew(rho_p_body) * core_reset;
+  Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) =
+      -Skew(rho_v_body) * core_reset;
   P_ = Gamma * P_ * Gamma.transpose();
   P_ = 0.5 * (P_ + P_.transpose());
   ApplyStateMaskToCov();
