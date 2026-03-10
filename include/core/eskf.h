@@ -44,6 +44,7 @@ struct State {
 struct InEkfConfig {
   bool enabled = false;
   bool true_iekf_mode = false;
+  bool apply_covariance_floor_after_reset = false;
   Vector3d p_init_ecef = Vector3d::Zero();  // RI 参考原点（Initialize 时设置）
   // RI GNSS 位置雅可比是否包含 p_ned_local 项。
   bool ri_gnss_pos_use_p_ned_local = true;
@@ -143,6 +144,19 @@ struct CovarianceFloor {
   double att_var = (0.01 * EIGEN_PI / 180.0) * (0.01 * EIGEN_PI / 180.0);       // rad^2
   double mounting_var = (0.1 * EIGEN_PI / 180.0) * (0.1 * EIGEN_PI / 180.0);     // rad^2
   double bg_var = 1e-8;    // (rad/s)^2
+};
+
+struct TrueInEkfCorrectionSnapshot {
+  bool valid = false;
+  double t_state = 0.0;
+  Matrix<double, kStateDim, kStateDim> P_tilde =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, kStateDim> P_after_reset =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, kStateDim> P_after_all =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, 1> dx = Matrix<double, kStateDim, 1>::Zero();
+  bool covariance_floor_applied = false;
 };
 
 /**
@@ -265,6 +279,9 @@ class EskfEngine {
    * 获取当前协方差矩阵（只读引用）。
    */
   const Matrix<double, kStateDim, kStateDim> &cov() const { return P_; }
+  const TrueInEkfCorrectionSnapshot &last_true_iekf_correction() const {
+    return last_true_iekf_correction_;
+  }
   /**
    * 获取当前 IMU 时间戳。
    */
@@ -304,6 +321,8 @@ class EskfEngine {
   void ApplyUpdateMaskToKalmanGain(MatrixXd &K, const StateMask *update_mask) const;
   void ApplyStateMaskToCov();
   void ApplyCovarianceFloor();
+  Matrix<double, kStateDim, kStateDim> BuildTrueInEkfResetGamma(
+      const VectorXd &dx) const;
 
   NoiseParams noise_;
   State state_;
@@ -317,4 +336,5 @@ class EskfEngine {
   StateMask state_mask_{};
   CorrectionGuard correction_guard_{};
   CovarianceFloor covariance_floor_{};
+  TrueInEkfCorrectionSnapshot last_true_iekf_correction_{};
 };

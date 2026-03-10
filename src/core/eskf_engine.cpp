@@ -110,6 +110,7 @@ bool EskfEngine::Predict() {
 bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
                          const MatrixXd &R, VectorXd *dx_out,
                          const StateMask *update_mask) {
+  last_true_iekf_correction_.valid = false;
   if (!initialized_ || y.size() == 0) {
     return false;
   }
@@ -147,8 +148,19 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
   bool use_true_iekf = (fej_ != nullptr && fej_->UseTrueInEkfMode());
   if (use_true_iekf) {
     UpdateCovarianceJoseph(K, H, R);
+    last_true_iekf_correction_.t_state = curr_imu_.t;
+    last_true_iekf_correction_.P_tilde = P_;
+    last_true_iekf_correction_.dx = dx;
+    last_true_iekf_correction_.covariance_floor_applied = false;
     InjectErrorState(dx);
     ApplyTrueInEkfReset(dx);
+    last_true_iekf_correction_.P_after_reset = P_;
+    if (fej_ != nullptr && fej_->apply_covariance_floor_after_reset) {
+      ApplyCovarianceFloor();
+      last_true_iekf_correction_.covariance_floor_applied = true;
+    }
+    last_true_iekf_correction_.P_after_all = P_;
+    last_true_iekf_correction_.valid = true;
   } else {
     InjectErrorState(dx);
     UpdateCovarianceJoseph(K, H, R);
@@ -336,7 +348,8 @@ void EskfEngine::UpdateCovarianceJoseph(const MatrixXd &K, const MatrixXd &H,
   ApplyStateMaskToCov();
 }
 
-void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
+Matrix<double, kStateDim, kStateDim> EskfEngine::BuildTrueInEkfResetGamma(
+    const VectorXd &dx) const {
   Matrix<double, kStateDim, kStateDim> Gamma =
       Matrix<double, kStateDim, kStateDim>::Identity();
   Vector3d rho_p_body = dx.segment<3>(StateIdx::kPos);
@@ -350,6 +363,11 @@ void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
       -Skew(rho_p_body) * core_reset;
   Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) =
       -Skew(rho_v_body) * core_reset;
+  return Gamma;
+}
+
+void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
+  Matrix<double, kStateDim, kStateDim> Gamma = BuildTrueInEkfResetGamma(dx);
   P_ = Gamma * P_ * Gamma.transpose();
   P_ = 0.5 * (P_ + P_.transpose());
   ApplyStateMaskToCov();

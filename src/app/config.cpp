@@ -530,6 +530,10 @@ FejConfig ApplyFejNode(const FejConfig &base, const YAML::Node &node,
   if (node["true_iekf_mode"]) {
     out.true_iekf_mode = node["true_iekf_mode"].as<bool>();
   }
+  if (node["apply_covariance_floor_after_reset"]) {
+    out.apply_covariance_floor_after_reset =
+        node["apply_covariance_floor_after_reset"].as<bool>();
+  }
   if (node["enable_layer2"]) {
     out.enable_layer2 = node["enable_layer2"].as<bool>();
   }

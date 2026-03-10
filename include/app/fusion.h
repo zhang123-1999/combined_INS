@@ -137,6 +137,7 @@ struct ConstraintConfig {
 struct FejConfig {
   bool enable = false;
   bool true_iekf_mode = false;
+  bool apply_covariance_floor_after_reset = false;
   bool enable_layer2 = true;    // deprecated
   int imu_window_size = 100;    // deprecated
   double omega_threshold = 0.05;  // deprecated
@@ -379,6 +380,40 @@ struct FusionResult {
   vector<Vector3d> gnss_lever_arm;  // GNSS天线杆臂估计值
 };
 
+struct GnssSplitCovarianceCapture {
+  bool valid = false;
+  string tag;
+  double split_t = 0.0;
+  double t_meas = 0.0;
+  double t_state = 0.0;
+  Vector3d P_att_bgz{Vector3d::Zero()};
+  Vector3d corr_att_bgz{Vector3d::Zero()};
+  Vector3d att_var{Vector3d::Zero()};
+  double bgz_var = 0.0;
+};
+
+struct ResetConsistencyCapture {
+  bool valid = false;
+  string tag;
+  double split_t = 0.0;
+  double t_meas = 0.0;
+  double t_state = 0.0;
+  Matrix<double, kStateDim, kStateDim> P_tilde =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, kStateDim> P_after_reset =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, kStateDim> P_after_all =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  Matrix<double, kStateDim, 1> dx = Matrix<double, kStateDim, 1>::Zero();
+  bool covariance_floor_applied = false;
+};
+
+struct FusionDebugCapture {
+  bool capture_last_gnss_before_split = false;
+  GnssSplitCovarianceCapture gnss_split_cov;
+  ResetConsistencyCapture reset_consistency;
+};
+
 /**
  * 读取并组织全量数据集（IMU/UWB/真值/基站）。
  */
@@ -389,7 +424,8 @@ Dataset LoadDataset(const FusionOptions &options);
  */
 FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
                        const State &x0,
-                       const Matrix<double, kStateDim, kStateDim> &P0);
+                       const Matrix<double, kStateDim, kStateDim> &P0,
+                       FusionDebugCapture *debug_capture = nullptr);
 
 /**
  * 评估输出摘要。

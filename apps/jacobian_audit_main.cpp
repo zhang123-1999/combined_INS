@@ -101,6 +101,30 @@ struct AuditSummary {
   string sol_path;
   string sol_mtime;
   double split_t = 0.0;
+  bool split_cov_valid = false;
+  string split_cov_tag;
+  double split_cov_t_meas = 0.0;
+  double split_cov_t_state = 0.0;
+  Vector3d split_cov_att_bgz{Vector3d::Zero()};
+  Vector3d split_corr_att_bgz{Vector3d::Zero()};
+  Vector3d split_att_var{Vector3d::Zero()};
+  double split_bgz_var = 0.0;
+  bool reset_consistency_valid = false;
+  string reset_tag;
+  double reset_t_meas = 0.0;
+  double reset_t_state = 0.0;
+  bool reset_floor_applied = false;
+  double reset_expected_norm = 0.0;
+  double reset_actual_norm = 0.0;
+  double reset_diff_norm = 0.0;
+  double reset_rel_fro = 0.0;
+  double reset_max_abs = 0.0;
+  int reset_worst_row = -1;
+  int reset_worst_col = -1;
+  string reset_p_tilde_path;
+  string reset_p_expected_path;
+  string reset_p_after_reset_path;
+  string reset_dx_path;
   vector<AuditSample> samples;
   vector<BlockError> block_errors;
   vector<ColumnError> column_errors;
@@ -137,6 +161,24 @@ string DatasetTagFromPath(const string &path) {
   if (lower.find("data4") != string::npos) return "data4";
   fs::path p(path);
   return p.stem().string();
+}
+
+Matrix<double, kStateDim, kStateDim> BuildTrueInEkfResetGammaFromDx(
+    const Matrix<double, kStateDim, 1> &dx) {
+  Matrix<double, kStateDim, kStateDim> Gamma =
+      Matrix<double, kStateDim, kStateDim>::Identity();
+  Vector3d rho_p_body = dx.segment<3>(StateIdx::kPos);
+  Vector3d rho_v_body = dx.segment<3>(StateIdx::kVel);
+  Vector3d phi_body = dx.segment<3>(StateIdx::kAtt);
+  Matrix3d core_reset = QuatToRot(QuatFromSmallAngle(-phi_body));
+  Gamma.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = core_reset;
+  Gamma.block<3, 3>(StateIdx::kPos, StateIdx::kAtt) =
+      -Skew(rho_p_body) * core_reset;
+  Gamma.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) =
+      -Skew(rho_v_body) * core_reset;
+  return Gamma;
 }
 
 vector<string> BuildStateNames() {
@@ -809,6 +851,70 @@ void SaveColumnErrorsCsv(const fs::path &path,
   }
 }
 
+void SaveSplitCovarianceCsv(const fs::path &path,
+                            const vector<AuditSummary> &summaries) {
+  ofstream fout(path);
+  fout << "dataset,config,tag,split_t,t_meas,t_state,"
+          "P_attx_bgz,P_atty_bgz,P_attz_bgz,"
+          "corr_attx_bgz,corr_atty_bgz,corr_attz_bgz,"
+          "var_attx,var_atty,var_attz,var_bgz\n";
+  for (const auto &summary : summaries) {
+    if (!summary.split_cov_valid) continue;
+    fout << summary.dataset << ','
+         << '"' << summary.config_path << '"' << ','
+         << summary.split_cov_tag << ','
+         << fixed << setprecision(9)
+         << summary.split_t << ','
+         << summary.split_cov_t_meas << ','
+         << summary.split_cov_t_state << ','
+         << summary.split_cov_att_bgz.x() << ','
+         << summary.split_cov_att_bgz.y() << ','
+         << summary.split_cov_att_bgz.z() << ','
+         << summary.split_corr_att_bgz.x() << ','
+         << summary.split_corr_att_bgz.y() << ','
+         << summary.split_corr_att_bgz.z() << ','
+         << summary.split_att_var.x() << ','
+         << summary.split_att_var.y() << ','
+         << summary.split_att_var.z() << ','
+         << summary.split_bgz_var << '\n';
+  }
+}
+
+void SaveResetConsistencyCsv(const fs::path &path,
+                             const vector<AuditSummary> &summaries) {
+  ofstream fout(path);
+  fout << "dataset,config,tag,split_t,t_meas,t_state,"
+          "floor_applied,expected_norm,actual_norm,diff_norm,rel_fro,max_abs,"
+          "worst_row,worst_col,p_tilde_path,p_expected_path,p_after_reset_path,dx_path\n";
+  for (const auto &summary : summaries) {
+    if (!summary.reset_consistency_valid) continue;
+    fout << summary.dataset << ','
+         << '"' << summary.config_path << '"' << ','
+         << summary.reset_tag << ','
+         << fixed << setprecision(9)
+         << summary.split_t << ','
+         << summary.reset_t_meas << ','
+         << summary.reset_t_state << ','
+         << (summary.reset_floor_applied ? 1 : 0) << ','
+         << summary.reset_expected_norm << ','
+         << summary.reset_actual_norm << ','
+         << summary.reset_diff_norm << ','
+         << summary.reset_rel_fro << ','
+         << summary.reset_max_abs << ','
+         << summary.reset_worst_row << ','
+         << summary.reset_worst_col << ','
+         << '"' << summary.reset_p_tilde_path << '"' << ','
+         << '"' << summary.reset_p_expected_path << '"' << ','
+         << '"' << summary.reset_p_after_reset_path << '"' << ','
+         << '"' << summary.reset_dx_path << '"' << '\n';
+  }
+}
+
+void SaveResetAuditMatrix(const fs::path &path, const MatrixXd &mat,
+                          const string &header = "") {
+  io::SaveMatrix(path.string(), mat, header);
+}
+
 map<pair<string, string>, BlockError> CollectWorstBlockPerMeasurement(
     const vector<AuditSummary> &summaries) {
   map<pair<string, string>, BlockError> worst;
@@ -851,7 +957,7 @@ void SaveSummaryMarkdown(const fs::path &path,
                          const VectorXd &eps) {
   ofstream fout(path);
   fout << "# Jacobian Audit Summary\n\n";
-  fout << "- Target: `ODO/NHC/GNSS_VEL` current config numeric-Jacobian audit\n";
+  fout << "- Target: `ODO/NHC/GNSS_VEL` numeric-Jacobian audit + GNSS split covariance + update-reset-covariance consistency\n";
   fout << "- Modes: audit the mode actually specified by each config (current run uses `true_iekf`)\n";
   fout << "- Finite difference: central difference on filter-consistent error injection\n";
   fout << "- Residual convention: compare analytic `H` against `-d(y)/d(dx)` because code stores `y = z - h`\n";
@@ -863,6 +969,30 @@ void SaveSummaryMarkdown(const fs::path &path,
     fout << "- Solution: `" << summary.sol_path << "`\n";
     fout << "- Solution mtime: `" << summary.sol_mtime << "`\n";
     fout << "- GNSS split_t: `" << ToStringPrec(summary.split_t, 6) << "`\n";
+    if (summary.split_cov_valid) {
+      fout << "- GNSS split covariance capture: tag=`" << summary.split_cov_tag
+           << "`, t_meas=`" << ToStringPrec(summary.split_cov_t_meas, 6)
+           << "`, t_state=`" << ToStringPrec(summary.split_cov_t_state, 6) << "`\n";
+      fout << "- P[att,bg_z]: `" << ToStringPrec(summary.split_cov_att_bgz.x(), 9)
+           << " " << ToStringPrec(summary.split_cov_att_bgz.y(), 9)
+           << " " << ToStringPrec(summary.split_cov_att_bgz.z(), 9) << "`\n";
+      fout << "- corr(att,bg_z): `" << ToStringPrec(summary.split_corr_att_bgz.x(), 6)
+           << " " << ToStringPrec(summary.split_corr_att_bgz.y(), 6)
+           << " " << ToStringPrec(summary.split_corr_att_bgz.z(), 6) << "`\n";
+    }
+    if (summary.reset_consistency_valid) {
+      fout << "- Reset consistency: tag=`" << summary.reset_tag
+           << "`, floor_after_reset=`"
+           << (summary.reset_floor_applied ? "ON" : "OFF")
+           << "`, rel_fro=`" << ToStringPrec(summary.reset_rel_fro, 12)
+           << "`, max_abs=`" << ToStringPrec(summary.reset_max_abs, 12)
+           << "`, worst=(row `" << summary.reset_worst_row
+           << "`, col `" << summary.reset_worst_col << "`)\n";
+      fout << "- Raw matrices: `" << summary.reset_p_tilde_path << "`, `"
+           << summary.reset_p_expected_path << "`, `"
+           << summary.reset_p_after_reset_path << "`, `"
+           << summary.reset_dx_path << "`\n";
+    }
     fout << "- Selected audit samples:\n";
     for (const auto &sample : summary.samples) {
       fout << "  - meas=`" << sample.measurement
@@ -932,6 +1062,7 @@ void SaveSummaryMarkdown(const fs::path &path,
 }
 
 AuditSummary RunAuditForConfig(const string &config_path,
+                               const fs::path &outdir,
                                const VectorXd &eps,
                                const vector<string> &state_names) {
   FusionOptions options = LoadFusionOptions(config_path);
@@ -962,6 +1093,8 @@ AuditSummary RunAuditForConfig(const string &config_path,
   FejManager fej;
   fej.Enable(options.fej.enable);
   fej.true_iekf_mode = options.fej.true_iekf_mode;
+  fej.apply_covariance_floor_after_reset =
+      options.fej.apply_covariance_floor_after_reset;
   fej.ri_gnss_pos_use_p_ned_local = options.fej.ri_gnss_pos_use_p_ned_local;
   fej.ri_vel_gyro_noise_mode = options.fej.ri_vel_gyro_noise_mode;
   fej.ri_inject_pos_inverse = options.fej.ri_inject_pos_inverse;
@@ -1092,6 +1225,86 @@ AuditSummary RunAuditForConfig(const string &config_path,
                                  gnss_vel_column_errors.begin(), gnss_vel_column_errors.end());
   }
 
+  State x0;
+  Matrix<double, kStateDim, kStateDim> P0;
+  if (!InitializeState(options, dataset.imu, dataset.truth, x0, P0)) {
+    throw runtime_error("failed to initialize state for reset-consistency replay: " +
+                        config_path);
+  }
+
+  FusionDebugCapture debug_capture;
+  debug_capture.capture_last_gnss_before_split = true;
+  RunFusion(options, dataset, x0, P0, &debug_capture);
+
+  if (!debug_capture.gnss_split_cov.valid) {
+    throw runtime_error("failed to capture GNSS split covariance for " + config_path);
+  }
+  summary.split_cov_valid = true;
+  summary.split_cov_tag = debug_capture.gnss_split_cov.tag;
+  summary.split_cov_t_meas = debug_capture.gnss_split_cov.t_meas;
+  summary.split_cov_t_state = debug_capture.gnss_split_cov.t_state;
+  summary.split_cov_att_bgz = debug_capture.gnss_split_cov.P_att_bgz;
+  summary.split_corr_att_bgz = debug_capture.gnss_split_cov.corr_att_bgz;
+  summary.split_att_var = debug_capture.gnss_split_cov.att_var;
+  summary.split_bgz_var = debug_capture.gnss_split_cov.bgz_var;
+
+  if (!debug_capture.reset_consistency.valid) {
+    throw runtime_error("failed to capture reset consistency snapshot for " + config_path);
+  }
+  summary.reset_consistency_valid = true;
+  summary.reset_tag = debug_capture.reset_consistency.tag;
+  summary.reset_t_meas = debug_capture.reset_consistency.t_meas;
+  summary.reset_t_state = debug_capture.reset_consistency.t_state;
+  summary.reset_floor_applied =
+      debug_capture.reset_consistency.covariance_floor_applied;
+
+  Matrix<double, kStateDim, 1> dx_reset = debug_capture.reset_consistency.dx;
+  Matrix<double, kStateDim, kStateDim> P_tilde =
+      debug_capture.reset_consistency.P_tilde;
+  Matrix<double, kStateDim, kStateDim> P_after_reset =
+      debug_capture.reset_consistency.P_after_reset;
+  Matrix<double, kStateDim, kStateDim> Gamma =
+      BuildTrueInEkfResetGammaFromDx(dx_reset);
+  Matrix<double, kStateDim, kStateDim> P_expected =
+      Gamma * P_tilde * Gamma.transpose();
+  P_expected = 0.5 * (P_expected + P_expected.transpose());
+
+  Matrix<double, kStateDim, kStateDim> diff = P_after_reset - P_expected;
+  summary.reset_expected_norm = P_expected.norm();
+  summary.reset_actual_norm = P_after_reset.norm();
+  summary.reset_diff_norm = diff.norm();
+  double denom = max({1e-12, summary.reset_expected_norm, summary.reset_actual_norm});
+  summary.reset_rel_fro = summary.reset_diff_norm / denom;
+  Eigen::Index worst_row = -1;
+  Eigen::Index worst_col = -1;
+  summary.reset_max_abs = diff.cwiseAbs().maxCoeff(&worst_row, &worst_col);
+  summary.reset_worst_row = static_cast<int>(worst_row);
+  summary.reset_worst_col = static_cast<int>(worst_col);
+
+  fs::path p_tilde_path = outdir / (summary.dataset + "_reset_p_tilde.txt");
+  fs::path p_expected_path = outdir / (summary.dataset + "_reset_p_expected.txt");
+  fs::path p_after_reset_path = outdir / (summary.dataset + "_reset_p_after_reset.txt");
+  fs::path dx_path = outdir / (summary.dataset + "_reset_dx.txt");
+  SaveResetAuditMatrix(p_tilde_path, P_tilde, "P_tilde");
+  SaveResetAuditMatrix(p_expected_path, P_expected, "P_expected");
+  SaveResetAuditMatrix(p_after_reset_path, P_after_reset, "P_after_reset");
+  SaveResetAuditMatrix(dx_path, dx_reset, "dx_reset");
+  summary.reset_p_tilde_path = p_tilde_path.string();
+  summary.reset_p_expected_path = p_expected_path.string();
+  summary.reset_p_after_reset_path = p_after_reset_path.string();
+  summary.reset_dx_path = dx_path.string();
+
+  cout << "[AuditSplitCov] dataset=" << summary.dataset
+       << " t_meas=" << summary.split_cov_t_meas
+       << " P_att_bgz=" << summary.split_cov_att_bgz.transpose()
+       << " corr_att_bgz=" << summary.split_corr_att_bgz.transpose() << "\n";
+  cout << "[AuditReset] dataset=" << summary.dataset
+       << " t_meas=" << summary.reset_t_meas
+       << " rel_fro=" << summary.reset_rel_fro
+       << " max_abs=" << summary.reset_max_abs
+       << " floor_after_reset="
+       << (summary.reset_floor_applied ? "ON" : "OFF") << "\n";
+
   return summary;
 }
 
@@ -1119,7 +1332,7 @@ fs::path ParseOutputDir(int argc, char **argv) {
       return fs::path(argv[++i]);
     }
   }
-  return fs::path("output/review/20260306-jacobian-audit-r1");
+  return fs::path("output/review/20260307-update-reset-consistency-r1");
 }
 
 }  // namespace
@@ -1137,12 +1350,14 @@ int main(int argc, char **argv) {
 
     for (const auto &config_path : config_paths) {
       cout << "[Audit] Running config: " << config_path << "\n";
-      summaries.push_back(RunAuditForConfig(config_path, eps, state_names));
+      summaries.push_back(RunAuditForConfig(config_path, outdir, eps, state_names));
     }
 
     SaveSelectedSamplesCsv(outdir / "selected_samples.csv", summaries);
     SaveBlockErrorsCsv(outdir / "block_errors.csv", summaries);
     SaveColumnErrorsCsv(outdir / "column_errors.csv", summaries);
+    SaveSplitCovarianceCsv(outdir / "split_covariance.csv", summaries);
+    SaveResetConsistencyCsv(outdir / "reset_consistency.csv", summaries);
     SaveSummaryMarkdown(outdir / "summary.md", summaries, eps);
 
     cout << "[Audit] Done. Artifacts:\n";
@@ -1150,6 +1365,8 @@ int main(int argc, char **argv) {
     cout << "  - " << (outdir / "selected_samples.csv").string() << "\n";
     cout << "  - " << (outdir / "block_errors.csv").string() << "\n";
     cout << "  - " << (outdir / "column_errors.csv").string() << "\n";
+    cout << "  - " << (outdir / "split_covariance.csv").string() << "\n";
+    cout << "  - " << (outdir / "reset_consistency.csv").string() << "\n";
     return 0;
   } catch (const exception &e) {
     cerr << "jacobian_audit failed: " << e.what() << "\n";

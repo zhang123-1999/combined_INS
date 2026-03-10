@@ -320,6 +320,67 @@ void PrintConstraintStats(const string &tag, const ConstraintUpdateStats &s) {
        << " noise_scale_mean=" << scale_mean << "\n";
 }
 
+double SafeCorrFromCov(const Matrix<double, kStateDim, kStateDim> &P,
+                       int a, int b) {
+  double pa = P(a, a);
+  double pb = P(b, b);
+  if (pa < 1e-30 || pb < 1e-30) {
+    return 0.0;
+  }
+  return P(a, b) / std::sqrt(pa * pb);
+}
+
+void MaybeCaptureGnssSplitDebug(FusionDebugCapture *debug_capture,
+                                const EskfEngine &engine,
+                                const string &tag,
+                                double t_meas,
+                                double split_t,
+                                double tol) {
+  if (debug_capture == nullptr || !debug_capture->capture_last_gnss_before_split) {
+    return;
+  }
+  if (!(t_meas <= split_t + tol)) {
+    return;
+  }
+  if (debug_capture->gnss_split_cov.valid &&
+      t_meas + tol < debug_capture->gnss_split_cov.t_meas) {
+    return;
+  }
+
+  const auto &P = engine.cov();
+  GnssSplitCovarianceCapture cov_capture;
+  cov_capture.valid = true;
+  cov_capture.tag = tag;
+  cov_capture.split_t = split_t;
+  cov_capture.t_meas = t_meas;
+  cov_capture.t_state = engine.timestamp();
+  cov_capture.P_att_bgz = P.block<3, 1>(StateIdx::kAtt, StateIdx::kBg + 2);
+  cov_capture.att_var = P.diagonal().segment<3>(StateIdx::kAtt);
+  cov_capture.bgz_var = P(StateIdx::kBg + 2, StateIdx::kBg + 2);
+  for (int i = 0; i < 3; ++i) {
+    cov_capture.corr_att_bgz(i) =
+        SafeCorrFromCov(P, StateIdx::kAtt + i, StateIdx::kBg + 2);
+  }
+  debug_capture->gnss_split_cov = cov_capture;
+
+  const auto &reset_snapshot = engine.last_true_iekf_correction();
+  if (reset_snapshot.valid) {
+    ResetConsistencyCapture reset_capture;
+    reset_capture.valid = true;
+    reset_capture.tag = tag;
+    reset_capture.split_t = split_t;
+    reset_capture.t_meas = t_meas;
+    reset_capture.t_state = reset_snapshot.t_state;
+    reset_capture.P_tilde = reset_snapshot.P_tilde;
+    reset_capture.P_after_reset = reset_snapshot.P_after_reset;
+    reset_capture.P_after_all = reset_snapshot.P_after_all;
+    reset_capture.dx = reset_snapshot.dx;
+    reset_capture.covariance_floor_applied =
+        reset_snapshot.covariance_floor_applied;
+    debug_capture->reset_consistency = reset_capture;
+  }
+}
+
 StateMask BuildStateMask(const StateAblationConfig &cfg) {
   StateMask mask;
   mask.fill(true);
@@ -709,7 +770,9 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
                    const FusionOptions &options,
                    DiagnosticsEngine &diag,
                    const ImuData *imu_curr,
-                   const FejManager *fej) {
+                   const FejManager *fej,
+                   double gnss_split_t,
+                   FusionDebugCapture *debug_capture) {
   if (dataset.gnss.timestamps.size() == 0) return;
   constexpr double kSigmaPosMin = 1e-4;
   constexpr double kSigmaVelMin = 1e-4;
@@ -766,6 +829,8 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
     }
 
     diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R, nullptr);
+    MaybeCaptureGnssSplitDebug(debug_capture, engine, "GNSS_POS", t_gnss,
+                               gnss_split_t, options.gating.time_tolerance);
 
     // 如果存在GNSS速度数据，执行速度更新
     if (has_vel && options.enable_gnss_velocity) {
@@ -1073,7 +1138,9 @@ Dataset LoadDataset(const FusionOptions &options) {
 // RunFusion — 融合主循环
 // ============================================================
 FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
-                       const State &x0, const Matrix<double, kStateDim, kStateDim> &P0) {
+                       const State &x0,
+                       const Matrix<double, kStateDim, kStateDim> &P0,
+                       FusionDebugCapture *debug_capture) {
   FusionResult result;
   if (dataset.imu.size() < 2) {
     cout << "error: IMU 数据不足，至少需要两帧增量\n";
@@ -1146,6 +1213,8 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   FejManager fej;
   fej.Enable(options.fej.enable);
   fej.true_iekf_mode = options.fej.true_iekf_mode;
+  fej.apply_covariance_floor_after_reset =
+      options.fej.apply_covariance_floor_after_reset;
   fej.ri_gnss_pos_use_p_ned_local = options.fej.ri_gnss_pos_use_p_ned_local;
   fej.ri_vel_gyro_noise_mode = options.fej.ri_vel_gyro_noise_mode;
   fej.ri_inject_pos_inverse = options.fej.ri_inject_pos_inverse;
@@ -1161,7 +1230,9 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
          << (fej.ri_gnss_pos_use_p_ned_local ? "ON" : "OFF")
          << " g_vel_gyro_mode=" << fej.ri_vel_gyro_noise_mode
          << " inject_pos_inverse="
-         << (fej.ri_inject_pos_inverse ? "ON" : "OFF") << "\n";
+         << (fej.ri_inject_pos_inverse ? "ON" : "OFF")
+         << " reset_floor="
+         << (fej.apply_covariance_floor_after_reset ? "ON" : "OFF") << "\n";
   }
   cout << "[Init] Ablation: "
        << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
@@ -1296,7 +1367,7 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
     }
     if (gnss_enabled_now) {
       RunGnssUpdate(engine, dataset, gnss_idx, t, options, diag, &imu_curr_ref,
-                    fej_ptr_mut);
+                    fej_ptr_mut, gnss_schedule_split_t, debug_capture);
     }
 
     // 7. 状态诊断
@@ -1314,6 +1385,24 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   if (options.constraints.enable_consistency_log) {
     PrintConstraintStats("NHC", nhc_stats);
     PrintConstraintStats("ODO", odo_stats);
+  }
+  if (debug_capture != nullptr && debug_capture->gnss_split_cov.valid) {
+    const auto &cov = debug_capture->gnss_split_cov;
+    cout << "[GNSS_SPLIT_COV] tag=" << cov.tag
+         << " split_t=" << cov.split_t
+         << " t_meas=" << cov.t_meas
+         << " t_state=" << cov.t_state
+         << " P_att_bgz=" << cov.P_att_bgz.transpose()
+         << " corr_att_bgz=" << cov.corr_att_bgz.transpose() << "\n";
+  }
+  if (debug_capture != nullptr && debug_capture->reset_consistency.valid) {
+    const auto &reset = debug_capture->reset_consistency;
+    cout << "[RESET_SNAPSHOT] tag=" << reset.tag
+         << " split_t=" << reset.split_t
+         << " t_meas=" << reset.t_meas
+         << " t_state=" << reset.t_state
+         << " floor_after_reset="
+         << (reset.covariance_floor_applied ? "ON" : "OFF") << "\n";
   }
   diag.Finalize(result.time_axis.empty() ? 0.0 : result.time_axis.back());
   return result;

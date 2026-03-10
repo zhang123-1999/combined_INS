@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use('Agg')  # 非交互后端，直接保存不弹窗
 import matplotlib.pyplot as plt
 import sys
+import yaml
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -58,6 +59,50 @@ def ecef_vel_to_ned(vx, vy, vz, lat_rad, lon_rad):
     ve = -sin_lon * vx + cos_lon * vy
     vd = -cos_lat * cos_lon * vx - cos_lat * sin_lon * vy - sin_lat * vz
     return vn, ve, vd
+
+
+def euler_to_rotation(roll_rad, pitch_rad, yaw_rad):
+    """欧拉角(Body -> Nav, ZYX)转旋转矩阵，支持标量或等长数组。"""
+    roll_rad = np.asarray(roll_rad)
+    pitch_rad = np.asarray(pitch_rad)
+    yaw_rad = np.asarray(yaw_rad)
+
+    sr = np.sin(roll_rad)
+    cr = np.cos(roll_rad)
+    sp = np.sin(pitch_rad)
+    cp = np.cos(pitch_rad)
+    sy = np.sin(yaw_rad)
+    cy = np.cos(yaw_rad)
+
+    r11 = cp * cy
+    r12 = sr * sp * cy - cr * sy
+    r13 = cr * sp * cy + sr * sy
+    r21 = cp * sy
+    r22 = sr * sp * sy + cr * cy
+    r23 = cr * sp * sy - sr * cy
+    r31 = -sp
+    r32 = sr * cp
+    r33 = cr * cp
+
+    return np.stack([
+        np.stack([r11, r12, r13], axis=-1),
+        np.stack([r21, r22, r23], axis=-1),
+        np.stack([r31, r32, r33], axis=-1),
+    ], axis=-2)
+
+
+def body_from_nav_velocity(vn, ve, vd, roll_rad, pitch_rad, yaw_rad):
+    """将 NED 速度转换到机体系速度 v_b = C_bn^T * v_n。"""
+    C_bn = euler_to_rotation(roll_rad, pitch_rad, yaw_rad)
+    v_n = np.stack([vn, ve, vd], axis=-1)
+    return np.einsum('...ji,...j->...i', C_bn, v_n)
+
+
+def rotate_body_to_nav(vx_body, vy_body, vz_body, roll_rad, pitch_rad, yaw_rad):
+    """将 body 系向量旋转到对应 nav 系，v_nav = C_bn * v_body。"""
+    C_bn = euler_to_rotation(roll_rad, pitch_rad, yaw_rad)
+    v_b = np.stack([vx_body, vy_body, vz_body], axis=-1)
+    return np.einsum('...ij,...j->...i', C_bn, v_b)
 
 
 # ========== 数据加载 ==========
@@ -221,6 +266,99 @@ def find_ref_file(sol_path):
     return None
 
 
+def find_config_file(sol_path):
+    """根据 SOL 文件自动寻找对应配置文件。"""
+    sol_name = os.path.basename(sol_path)
+    stem = os.path.splitext(sol_name)[0]
+
+    if stem.startswith('SOL_'):
+        candidate = f'config_{stem[4:]}.yaml'
+        if os.path.isfile(candidate):
+            return candidate
+
+    for candidate in sorted(glob.glob('config*.yaml')):
+        try:
+            with open(candidate, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f) or {}
+            fusion_output = ((cfg.get('fusion') or {}).get('output_path')) or ''
+            generator_output = ((cfg.get('generator') or {}).get('output_path')) or ''
+            if os.path.basename(str(fusion_output)) == sol_name:
+                return candidate
+            if os.path.basename(str(generator_output)) == sol_name:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def load_mounting_base_rpy_deg(config_path):
+    """复现 pipeline 中 mounting_base_rpy 的逻辑，返回 [roll, pitch, yaw] (deg)。"""
+    if not config_path or not os.path.isfile(config_path):
+        return np.zeros(3)
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f) or {}
+
+    fusion_cfg = cfg.get('fusion') or {}
+    constraints_cfg = fusion_cfg.get('constraints') or {}
+    init_cfg = fusion_cfg.get('init') or {}
+
+    cfg_mounting = np.array(constraints_cfg.get('imu_mounting_angle', [0.0, 0.0, 0.0]), dtype=float)
+    if cfg_mounting.size != 3:
+        cfg_mounting = np.zeros(3)
+
+    mounting_base = cfg_mounting.copy()
+    use_legacy = bool(init_cfg.get('use_legacy_mounting_base_logic', True))
+    init_pitch = float(init_cfg.get('mounting_pitch0', 0.0) or 0.0)
+    init_yaw = float(init_cfg.get('mounting_yaw0', 0.0) or 0.0)
+    eps = 1e-12
+    if use_legacy:
+        if abs(init_pitch) > eps:
+            mounting_base[1] = 0.0
+        if abs(init_yaw) > eps:
+            mounting_base[2] = 0.0
+    return mounting_base
+
+
+def maybe_add_vehicle_velocity(data, config_path=None):
+    """为新格式数据添加车体 v 系速度列。"""
+    if data['_format'].iloc[0] != 'new':
+        return None
+
+    required_cols = ['vn', 've', 'vd', 'fused_roll', 'fused_pitch', 'fused_yaw',
+                     'mounting_pitch', 'mounting_yaw']
+    if not all(col in data.columns for col in required_cols):
+        return None
+
+    mounting_base_deg = load_mounting_base_rpy_deg(config_path)
+    body_vel = body_from_nav_velocity(
+        data['vn'].to_numpy(),
+        data['ve'].to_numpy(),
+        data['vd'].to_numpy(),
+        np.radians(data['fused_roll'].to_numpy()),
+        np.radians(data['fused_pitch'].to_numpy()),
+        np.radians(data['fused_yaw'].to_numpy()),
+    )
+
+    mount_roll_deg = np.full(len(data), mounting_base_deg[0])
+    mount_pitch_deg = mounting_base_deg[1] + data['mounting_pitch'].to_numpy()
+    mount_yaw_deg = mounting_base_deg[2] + data['mounting_yaw'].to_numpy()
+    veh_vel = rotate_body_to_nav(
+        body_vel[:, 0], body_vel[:, 1], body_vel[:, 2],
+        np.radians(mount_roll_deg),
+        np.radians(mount_pitch_deg),
+        np.radians(mount_yaw_deg),
+    )
+
+    data['vv_x'] = veh_vel[:, 0]
+    data['vv_y'] = veh_vel[:, 1]
+    data['vv_z'] = veh_vel[:, 2]
+    return {
+        'config_path': config_path,
+        'mounting_base_deg': mounting_base_deg,
+    }
+
+
 def load_ref(filepath):
     """加载真值文件，返回统一格式的DataFrame
 
@@ -340,6 +478,25 @@ def plot_velocity(data, axes, ref=None):
         ax.grid(True, alpha=0.3)
         if ref is not None:
             ax.legend(fontsize=8)
+    ax3.set_xlabel('时间 [s]')
+
+
+def plot_velocity_vehicle_v(data, axes):
+    """绘制车体 v 系速度。"""
+    ax1, ax2, ax3 = axes
+    time = get_time(data)
+    for ax, key, color, label in zip(
+        [ax1, ax2, ax3],
+        ['vv_x', 'vv_y', 'vv_z'],
+        ['b', 'r', 'g'],
+        ['v系前向速度 $v_x^v$', 'v系横向速度 $v_y^v$', 'v系垂向速度 $v_z^v$'],
+    ):
+        ax.plot(time, data[key], f'{color}-', linewidth=0.8)
+        if key in ('vv_y', 'vv_z'):
+            ax.axhline(0.0, color='k', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax.set_ylabel(f'{label} [m/s]')
+        ax.set_title(label)
+        ax.grid(True, alpha=0.3)
     ax3.set_xlabel('时间 [s]')
 
 
@@ -556,9 +713,10 @@ def plot_ecef_position(data, axes):
 # ========== 主函数 ==========
 
 def main():
-    if len(sys.argv) < 2:
-        print("用法: python plot_navresult.py <结果文件>")
+    if len(sys.argv) not in (2, 3):
+        print("用法: python plot_navresult.py <结果文件> [配置文件]")
         print("示例: python plot_navresult.py SOL_data4_gnss.txt")
+        print("示例: python plot_navresult.py SOL_data4_gnss30_true_iekf.txt config_data4_gnss30_true_iekf.yaml")
         sys.exit(1)
 
     filepath = sys.argv[1]
@@ -585,6 +743,15 @@ def main():
     # ---- 加载真值 ----
     ref = None
     ref_path = find_ref_file(filepath)
+    config_path = sys.argv[2] if len(sys.argv) == 3 else find_config_file(filepath)
+    vehicle_vel_meta = maybe_add_vehicle_velocity(data, config_path)
+    if vehicle_vel_meta is not None:
+        base_roll, base_pitch, base_yaw = vehicle_vel_meta['mounting_base_deg']
+        print(f"v系速度计算配置: {vehicle_vel_meta['config_path']}")
+        print(f"v系 base mounting rpy [deg]: roll={base_roll:.6f}, pitch={base_pitch:.6f}, yaw={base_yaw:.6f}")
+    else:
+        print("未生成 v系速度列（可能是旧格式结果或未找到所需安装角信息）")
+
     if ref_path and os.path.isfile(ref_path):
         ref = load_ref(ref_path)
         print(f"已加载真值: {ref_path} ({len(ref)} 条记录)")
@@ -618,6 +785,14 @@ def main():
     plot_velocity(data, axes2, ref)
     figures.append(fig2)
     figure_names.append((fig2, '02_velocity_NED.png'))
+
+    # ---- 第2b页: 车体 v 系速度 ----
+    if vehicle_vel_meta is not None:
+        fig2b = create_figure('导航结果 — 速度 (车体 v 系)')
+        axes2b = [fig2b.add_subplot(3, 1, i) for i in range(1, 4)]
+        plot_velocity_vehicle_v(data, axes2b)
+        figures.append(fig2b)
+        figure_names.append((fig2b, '02b_velocity_vehicle_v.png'))
 
     # ---- 第3页: 姿态角 ----
     fig3 = create_figure('导航结果 — 姿态角')
