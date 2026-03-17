@@ -11,7 +11,8 @@ fusion:
   imu_path: dataset/data2_converted/IMU_converted.txt
   odo_path: dataset/data2_converted/ODO_converted.txt
   pos_path: dataset/data2_converted/POS_converted.txt
-  gnss_path: dataset/data2_converted/GNSS_converted.txt
+  gnss_path: dataset/data2/rtk.txt
+  enable_gnss_velocity: false
   uwb_path: ''
   output_path: SOL_data2_baseline_eskf.txt
   starttime: 528076.0
@@ -24,6 +25,9 @@ fusion:
     imu_window_size: 100
     omega_threshold: 0.05
     accel_threshold: 0.5
+  ablation:
+    disable_mounting_roll: true
+    disable_gnss_lever_z: true
   noise:
     sigma_acc: 0.05
     sigma_gyro: 0.005

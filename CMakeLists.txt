@@ -46,6 +46,7 @@ target_link_libraries(uwb_io PUBLIC Eigen3::Eigen)
 
 add_library(uwb_app
   src/app/config.cpp
+  src/app/dataset_loader.cpp
   src/app/initialization.cpp
   src/app/pipeline_fusion.cpp
   src/app/evaluation.cpp
@@ -65,3 +66,6 @@ target_link_libraries(data_converter PRIVATE uwb_utils Eigen3::Eigen)
 
 add_executable(jacobian_audit apps/jacobian_audit_main.cpp)
 target_link_libraries(jacobian_audit PRIVATE uwb_app)
+
+add_executable(regression_checks apps/regression_checks_main.cpp)
+target_link_libraries(regression_checks PRIVATE uwb_app)

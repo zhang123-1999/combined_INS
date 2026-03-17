@@ -9,7 +9,6 @@
 using namespace std;
 using namespace Eigen;
 //.\build\Release\uwb_generator.exe
-static const string kConfigFile = "config.yaml";
 
 /**
  * UWB 数据生成程序入口。
@@ -18,7 +17,14 @@ static const string kConfigFile = "config.yaml";
 int main(int argc, char **argv) {
   try {
     // 1) 读取配置
-    GeneratorOptions opt = LoadGeneratorOptions(kConfigFile);
+    string config_path = "config.yaml";
+    for (int i = 1; i < argc - 1; ++i) {
+      if (string(argv[i]) == "--config") {
+        config_path = argv[i + 1];
+        break;
+      }
+    }
+    GeneratorOptions opt = LoadGeneratorOptions(config_path);
 
     // 2) 读取真值轨迹 (t, x, y, z)
     MatrixXd pos = io::LoadMatrix(opt.pos_path, 4);

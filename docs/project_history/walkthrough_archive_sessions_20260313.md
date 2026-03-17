@@ -1,0 +1,2170 @@
+# walkthrough_archive_sessions_20260313.md
+
+Source: archived session content moved out of `walkthrough.md` on `2026-03-13`.
+
+## phase_summary_original
+
+### 阶段摘要（压缩，保留可追溯 ID）
+
+- 阶段A `20260304-1435 ~ 20260304-1855`：
+  - 完成协作文档、基础回归核对与历史问题修复（`ISSUE-002/003` 关闭）。
+  - 相关 session: `20260304-1435-agent-doc-bootstrap`, `20260304-1505-agent-md-fix-bootstrap-and-context`, `20260304-1822-pre_experiment_audit`, `20260304-1855-fix-five-issues-and-md-check`。
+- 阶段B `20260304-2016 ~ 20260304-2318`：
+  - InEKF 从 FEJ 依赖版重写到 RI 实现，并测试 `G(kVel,gyro)` 单点修补。
+  - 关键实验: `EXP-20260304-inekf-refactor-minrisk-debug`, `EXP-20260304-inekf-rewrite-no-fej`, `EXP-20260304-inekf-ri-realization-codeoverhaul3`, `EXP-20260304-inekf-ri-gvelgyro-fix`。
+- 阶段C `20260304-2358 ~ 20260305-0018`：
+  - 审查 + deep-research + 顺序 A/B，锁定 best 开关 `p_local=ON, g=+1, inject=ON`。
+  - 关键实验: `EXP-20260304-inekf-ri-fgqd-audit-r2`, `EXP-20260305-inekf-deep-research-audit-r1`, `EXP-20260305-inekf-ab-seq-r1`。
+- 阶段D `20260305-0032 ~ 20260305-1058`：
+  - 完成 best4 主回归、`walkthrough.md` 首轮瘦身、post-GNSS 冻结矩阵、`GNSS_POS/GNSS_VEL` 机制补证，以及状态块 `21-30` 漂移分析。
+  - 关键结果: baseline ESKF/InEKF RMSE3D `1.223242/1.723701`；GNSS30 `127.618202/88.890702`；`s1m1l0` post-GNSS 冻结分支 RMSE3D `61.048699`。
+  - 相关 session: `20260305-0032-best4-regression-and-plot`, `20260305-0042-tidy-walkthrough-and-promote-inekf-baseline`, `20260305-1010-inekf-fghi-audit-and-doubleoff`, `20260305-1018-issue001-baseline-compare-refresh`, `20260305-1029-postgnss-freeze-matrix-r1`, `20260305-1033-baseline-gmode-sensitivity-r1`, `20260305-1039-postgnss-headratio-robustness-r1`, `20260305-1048-stage-summary-writeback`, `20260305-1058-gmode-gnssvel-and-state21-30-drift`。
+- 阶段E `20260305-1611 ~ 20260305-2222`：
+  - 对齐 data2/data4 主口径与自动化视图，建立 data4 的 best switch、主回归与冻结矩阵结论。
+  - 关键结果: data4 best switch 为 `p0_g1_i0`；baseline ESKF/InEKF RMSE3D `0.929070/0.876829`；GNSS30 `51.371318/73.714930`。
+  - 相关 session: `20260305-1611-automation-worktree-overview`, `20260305-2222-inekf-eskf-data2-data4-pipeline`。
+- 阶段F `20260306-1003 ~ 20260306-1902`：
+  - 完成 tex-code audit、`true_iekf` 分支落地、`GNSS_VEL/ODO/NHC` 消融、phase-2/2b/2c 重构和 `bg` 冻结验证，并导出全状态图辅助机理判断。
+  - 关键结果: data2 baseline `1.723701→1.228326→1.228557`；data2 GNSS30 `201.158876→165.591338`；data4 GNSS30 `115.499686→22.405382`；data2 `freeze_bg` / `freeze_bg_mount` 分别降至 `98.82 / 56.03 m`。
+  - 相关 session: `20260306-1003-inekf-tex-code-audit-r1`, `20260306-1012-inekf-architecture-choice`, `20260306-1128-true-iekf-refactor-and-compare-r1`, `20260306-1349-true-iekf-gnss30-ablation-r1`, `20260306-1600-github-sync-current-work`, `20260306-1654-true-iekf-phase2-and-tex-sync`, `20260306-1714-data4-vs-data2-gnss30-gap-analysis`, `20260306-1759-phase2b-data2-gnss30-diagnostics`, `20260306-1835-phase2b-heading-source-attribution`, `20260306-1848-phase2c-bg-freeze-validation`, `20260306-1902-gnss30-stateplots-export`。
+- 阶段G `20260306-2317 ~ 20260307-0040`：
+  - 先整理“转弯放大真实 heading drift、但不足以单独解释 `InEKF < ESKF`”的解释链，再转向程序级排错；修复 `GNSS_POS` residual covariance frame，并用 numerical audit 排除 `ODO/NHC` 与 `GNSS_VEL` Jacobian 作为当前主 bug。
+  - 关键结果: `GNSS_POS` frame 修复后 data2/data4 GNSS30 RMSE3D `165.591338→164.245119` / `22.405382→23.144670`；`ODO/NHC` worst rel_fro `1.48e-4/4.12e-4`；data4 `GNSS_VEL` focus blocks `rel_fro=0`。
+  - 相关 session: `20260306-2317-turning-vs-inekf-eskf-analysis`, `20260306-2336-program-audit-and-gnsspos-rframe-fix`, `20260307-0001-jacobian-audit-r1`, `20260307-0040-jacobian-audit-gnssvel-r2`。
+
+## archived_session_blocks_by_theme
+
+### theme_01_inekf_initial_rewrite_best_switch | InEKF 初版重写与 best switch 锁定
+
+#### session_ids_covered
+
+- `20260304-1435-agent-doc-bootstrap`
+- `20260304-1505-agent-md-fix-bootstrap-and-context`
+- `20260304-1822-pre_experiment_audit`
+- `20260304-1855-fix-five-issues-and-md-check`
+- `20260305-0032-best4-regression-and-plot`
+- `20260305-0042-tidy-walkthrough-and-promote-inekf-baseline`
+- `20260305-1010-inekf-fghi-audit-and-doubleoff`
+- `20260305-1018-issue001-baseline-compare-refresh`
+- `20260305-1033-baseline-gmode-sensitivity-r1`
+- `20260305-1048-stage-summary-writeback`
+
+#### complete_raw_blocks
+
+- none (phase-summary-only carry-forward).
+
+### theme_02_true_iekf_branch_phase2 | true_iekf 分支建立与 phase-2 主修复
+
+#### session_ids_covered
+
+- `20260306-1003-inekf-tex-code-audit-r1`
+- `20260306-1012-inekf-architecture-choice`
+- `20260306-1128-true-iekf-refactor-and-compare-r1`
+- `20260306-1349-true-iekf-gnss30-ablation-r1`
+- `20260306-1654-true-iekf-phase2-and-tex-sync`
+- `20260306-2317-turning-vs-inekf-eskf-analysis`
+- `20260306-2336-program-audit-and-gnsspos-rframe-fix`
+- `20260307-0001-jacobian-audit-r1`
+- `20260307-0040-jacobian-audit-gnssvel-r2`
+- `20260307-1101-reset-covariance-audit-r1`
+- `20260310-1935-true-iekf-reset-audit`
+
+#### complete_raw_blocks
+
+### session_id: 20260307-1101-reset-covariance-audit-r1
+
+- timestamp: 2026-03-07 11:01 (local)
+- objective: 完成 3 个 reset/covariance 相关实验：after-reset covariance floor 效果、GNSS split 点 `P[att,bg_z]` 对比、以及 update-reset-covariance 一致性审计。
+- scope:
+  - 在 true IEKF 路径中加入 after-reset covariance floor 开关，并对 `data2 GNSS30` 做三组对照运行。
+  - 扩展 `RunFusion` / `jacobian_audit` 捕获 GNSS 有效窗口末尾互协方差与 true IEKF reset 前后 covariance 快照。
+  - 用独立 `Gamma * P_tilde * Gamma^T` 重算 split 附近 GNSS 更新后的 reset covariance，并与实际 `P_` 做数值对比。
+- changed_files:
+  - `include/core/eskf.h`
+  - `src/core/eskf_engine.cpp`
+  - `include/app/fusion.h`
+  - `src/app/config.cpp`
+  - `src/app/pipeline_fusion.cpp`
+  - `apps/jacobian_audit_main.cpp`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/20260307-reset-floor-r1/cfg_ref.yaml`
+  - `output/review/20260307-reset-floor-r1/cfg_predict_floor.yaml`
+  - `output/review/20260307-reset-floor-r1/cfg_predict_and_reset_floor.yaml`
+- commands:
+  - `cmake --build build --config Release --target eskf_fusion jacobian_audit`
+  - `build/Release/eskf_fusion.exe output/review/20260307-reset-floor-r1/cfg_ref.yaml`
+  - `build/Release/eskf_fusion.exe output/review/20260307-reset-floor-r1/cfg_predict_floor.yaml`
+  - `build/Release/eskf_fusion.exe output/review/20260307-reset-floor-r1/cfg_predict_and_reset_floor.yaml`
+  - `build/Release/jacobian_audit.exe --outdir output/review/20260307-update-reset-consistency-r1`
+  - `Get-Content output/review/20260307-reset-floor-r1/*.log | Select-String 'RMSE'`
+- artifacts:
+  - `output/review/20260307-reset-floor-r1/ref.log`
+  - `output/review/20260307-reset-floor-r1/predict_floor.log`
+  - `output/review/20260307-reset-floor-r1/predict_and_reset_floor.log`
+  - `output/review/20260307-reset-floor-r1/SOL_data2_gnss30_true_iekf_ref.txt`
+  - `output/review/20260307-reset-floor-r1/SOL_data2_gnss30_true_iekf_predict_floor.txt`
+  - `output/review/20260307-reset-floor-r1/SOL_data2_gnss30_true_iekf_predict_and_reset_floor.txt`
+  - `output/review/20260307-update-reset-consistency-r1/summary.md`
+  - `output/review/20260307-update-reset-consistency-r1/split_covariance.csv`
+  - `output/review/20260307-update-reset-consistency-r1/reset_consistency.csv`
+  - `output/review/20260307-update-reset-consistency-r1/data2_reset_p_expected.txt`
+  - `output/review/20260307-update-reset-consistency-r1/data4_reset_p_expected.txt`
+- metrics:
+  - experiment(1) data2 GNSS30 RMSE xyz / RMSE3D:
+    - ref: `87.886 80.638 112.916` / `164.245119`
+    - predict_floor: `81.700 98.323 101.952` / `163.513035`
+    - predict_and_reset_floor: `81.386 98.487 101.551` / `163.205318`
+    - after-reset floor 相对 ref 改善 `-1.039801 m` (`-0.633%`)，相对 predict-floor 额外改善 `-0.307717 m` (`-0.188%`)
+  - experiment(2) GNSS split 点 `P[att,bg_z]`:
+    - data2: `P_att_bgz=[-2e-9,-0,-1.3e-8]`, `corr_att_bgz=[-0.002308,-0.000052,-0.020641]`
+    - data4: `P_att_bgz=[1e-9,6e-9,-1.04e-7]`, `corr_att_bgz=[0.000909,0.009055,-0.084320]`
+    - `|P(att_z,bg_z)|` data4/data2 `≈8.0x`，`|corr(att_z,bg_z)|` data4/data2 `≈4.09x`
+  - experiment(3) reset consistency:
+    - data2: `expected_norm=actual_norm=0.009996280`, `diff_norm=0`, `rel_fro=0`, `max_abs=0`
+    - data4: `expected_norm=actual_norm=0.005459867`, `diff_norm=0`, `rel_fro=0`, `max_abs=0`
+- artifact_mtime:
+  - `output/review/20260307-reset-floor-r1/ref.log`: `2026-03-07 10:55:45`
+  - `output/review/20260307-reset-floor-r1/predict_floor.log`: `2026-03-07 10:56:28`
+  - `output/review/20260307-reset-floor-r1/predict_and_reset_floor.log`: `2026-03-07 10:57:11`
+  - `output/review/20260307-update-reset-consistency-r1/summary.md`: `2026-03-07 11:00:31`
+  - `output/review/20260307-update-reset-consistency-r1/split_covariance.csv`: `2026-03-07 11:00:31`
+  - `output/review/20260307-update-reset-consistency-r1/reset_consistency.csv`: `2026-03-07 11:00:31`
+- config_hash_or_mtime:
+  - 主配置仍为 `config_data2_gnss30_true_iekf.yaml` / `config_data4_gnss30_true_iekf.yaml`；本会话新增开关经 `output/review/20260307-reset-floor-r1/cfg_*.yaml` 明确固化。
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（reset-floor 三组日志与 reset-consistency 审计产物均在本会话 fresh 生成）
+- observability_notes:
+  - 关注状态块为 `att(6-8)` 与 `bg(12-14)`，其中本次直接审阅 `bg_z` 与 attitude 三轴的互协方差建立情况。
+  - 传感器窗口采用 `fusion.gnss_schedule.head_ratio=0.3`：GNSS 仅在前 30% 有效，split 附近仍有 ODO/NHC 持续更新，适合检查 GNSS 是否在关闭前为 `att-bg` 建立足够约束。
+  - after-reset covariance floor 仅带来小幅收益，说明它更像数值稳健性补丁，而非当前 `data2` 大误差的主因。
+  - split 点 reset covariance 数值完全一致，说明 `ApplyTrueInEkfReset` 的 `Gamma` 传播本身未在该关键 GNSS 更新步引入额外数值误差；更可疑的是 GNSS 有效窗口内 `att-bg_z` 约束积累不足。
+- decision:
+  - 实验(1) 结论：`ApplyCovarianceFloor()` 在每次 `ApplyTrueInEkfReset` 后调用确有改善，但幅度很小，不足以解释或修复 `data2` 的主残余 gap。
+  - 实验(2) 结论：data2 在 GNSS split 前的 `att_z-bg_z` 互协方差与相关系数显著弱于 data4，支持“GNSS 期间没有建立足够 attitude-bias 约束”的方向。
+  - 实验(3) 结论：至少在已知 split 附近 GNSS 更新步，update-reset-covariance 数值链路是自洽的，后续排查重点应从“reset 算错”转向“约束为何没被建立/积累起来”。
+- next_step:
+  - 对 `data2/data4` 记录 GNSS 有效窗口内 `P[att,bg_z]`、相关 Kalman gain 与 `dx_bg_z` 的完整时序，定位 data2 约束增长为何偏弱。
+
+### session_id: 20260310-1935-true-iekf-reset-audit
+
+- timestamp: 2026-03-10 19:35 (local)
+- objective: 核查 ApplyTrueInEkfReset 的 reset Jacobian 是否缺失 pos/vel ← att 交叉项，并对照文档公式。
+- scope:
+  - 检查 `BuildTrueInEkfResetGamma` 实现。
+  - 对照 `可观性分析讨论与InEKF算法.tex` 的 $\bm\Gamma_k$ 公式。
+- changed_files:
+  - N/A
+- configs:
+  - N/A
+- commands:
+  - `Get-Content walkthrough.md`
+  - `Get-Content src/core/eskf_engine.cpp`
+  - `Select-String -Path 算法文档\\可观性分析讨论与InEKF算法.tex -Pattern "Gamma|\\bm\\Gamma" -Context 5,5`
+- artifacts:
+  - N/A
+- metrics:
+  - N/A
+- observability_notes:
+  - `BuildTrueInEkfResetGamma` 已包含 `-Skew(rho_p_body) * R_\Gamma` 与 `-Skew(rho_v_body) * R_\Gamma`，与文档公式一致；核心块外为单位阵。
+  - 因此 P(pos/vel, att) 与欧氏扩展状态的互协方差在 reset 中会被重映射。
+- decision:
+  - 当前代码不存在“pos/vel ← att 交叉项缺失”的问题；若仍有 bg_z 约束偏弱迹象，需要从 true_iekf 启用与量测坐标一致性继续排查。
+- next_step:
+  - 若需进一步验证，添加 debug 输出（Gamma、dx、P[att,bg_z]）或定位未做 true_iekf 坐标变换的量测模型（如 ZUPT/UWB，若启用）。
+
+
+### theme_03_data2_postgnss_bg_mounting_chain | data2 post-GNSS 漂移与 bg/mounting 因果链
+
+#### session_ids_covered
+
+- `20260305-1029-postgnss-freeze-matrix-r1`
+- `20260305-1039-postgnss-headratio-robustness-r1`
+- `20260305-1058-gmode-gnssvel-and-state21-30-drift`
+- `20260306-1759-phase2b-data2-gnss30-diagnostics`
+- `20260306-1835-phase2b-heading-source-attribution`
+- `20260306-1848-phase2c-bg-freeze-validation`
+- `20260306-1902-gnss30-stateplots-export`
+- `20260307-1023-add-vframe-velocity-plots`
+- `20260310-1545-mounting-median-report`
+- `20260310-1558-html-mounting-note`
+- `20260310-1643-inekf-mechanism-r1`
+
+#### complete_raw_blocks
+
+### session_id: 20260307-1023-add-vframe-velocity-plots
+
+- timestamp: 2026-03-07 10:23 (local)
+- objective: 为 `plot_navresult.py` 增加车体 `v系` 速度图，并 fresh 生成 `data2/data4 GNSS30 true_iekf` 的可视化产物，方便研究 ODO/NHC 效果。
+- scope:
+  - 修改绘图脚本，按当前代码口径从 `NED -> body -> vehicle(v)` 复原 `v系` 速度。
+  - 基于匹配配置文件复现 `mounting_base_rpy` 的 legacy 逻辑，并对两组 GNSS30 true_iekf 结果重新出图。
+- changed_files:
+  - `plot_navresult.py`
+  - `output/result_data230_true_iekf/02b_velocity_vehicle_v.png`
+  - `output/result_data430_true_iekf/02b_velocity_vehicle_v.png`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+- commands:
+  - `python -m py_compile plot_navresult.py`
+  - `python plot_navresult.py SOL_data2_gnss30_true_iekf.txt config_data2_gnss30_true_iekf.yaml`
+  - `python plot_navresult.py SOL_data4_gnss30_true_iekf.txt config_data4_gnss30_true_iekf.yaml`
+  - `python` 统计 `v_y^v / v_z^v` 的 RMS 与 P95(abs)
+- artifacts:
+  - `plot_navresult.py`
+  - `output/result_data230_true_iekf/02b_velocity_vehicle_v.png`
+  - `output/result_data430_true_iekf/02b_velocity_vehicle_v.png`
+- metrics:
+  - data2 full/post-GNSS `v_y^v` RMS `0.0793/0.0848 m/s`, `v_z^v` RMS `0.0388/0.0389 m/s`
+  - data2 full/post-GNSS `|v_y^v|` P95 `0.2217/0.2434 m/s`, `|v_z^v|` P95 `0.0774/0.0781 m/s`
+  - data4 full/post-GNSS `v_y^v` RMS `0.0630/0.0649 m/s`, `v_z^v` RMS `0.0361/0.0377 m/s`
+  - data4 full/post-GNSS `|v_y^v|` P95 `0.1617/0.1791 m/s`, `|v_z^v|` P95 `0.0597/0.0635 m/s`
+- artifact_mtime:
+  - `output/result_data230_true_iekf/02b_velocity_vehicle_v.png`: `2026-03-07 10:21:40`
+  - `output/result_data430_true_iekf/02b_velocity_vehicle_v.png`: `2026-03-07 10:22:33`
+- config_hash_or_mtime:
+  - 本会话未改两份主配置；绘图时显式传入对应 `config_data2_gnss30_true_iekf.yaml` / `config_data4_gnss30_true_iekf.yaml`
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（`02b_velocity_vehicle_v.png` 与统计结果均在本会话 fresh 生成）
+- observability_notes:
+  - 新图直接对应 ODO/NHC 关注的速度块：`v_x^v` 对应 ODO 前向速度约束，`v_y^v / v_z^v` 对应 NHC 侧向/垂向近零约束。
+  - 传感器窗口保持 GNSS30 主配置：`fusion.gnss_schedule.head_ratio=0.3`，GNSS 在前 30% 后关闭，ODO/NHC 全程持续工作。
+  - 本会话不改变状态估计，只增强诊断可视化；可观性关联重点仍是姿态/安装角/偏置对 `v_y^v / v_z^v` 的间接影响，其中扩展状态块主要涉及 `odo_scale(21)`, `mounting(22-24)`。
+- decision:
+  - `plot_navresult.py` 现在可在新格式 SOL 文件上自动生成 `v系` 速度图，并能基于匹配配置复原 `C_b_v` 的 base mounting 逻辑。
+  - 两组 GNSS30 true_iekf 图像已 fresh 落盘，可直接用于后续 ODO/NHC 机理审阅；当前仅新增诊断证据，不更新算法优劣结论。
+- next_step:
+  - 结合 `02b_velocity_vehicle_v.png` 与现有 `03_attitude.png/08_mount_angles.png`，优先人工审阅 GNSS split 前后 `v_y^v / v_z^v` 与 heading/mounting 漂移的联动时窗。
+
+### session_id: 20260310-1545-mounting-median-report
+
+- timestamp: 2026-03-10 15:45 (local)
+- objective: 用全 GNSS true_iekf 安装角中位数作为 v 系真值基准，重算并导出交互报告。
+- scope:
+  - 新跑 data2 全程 GNSS true_iekf，输出 SOL 供中位数计算。
+  - 在 `interactive_nav_report.py` 中加入基于 data2/data4 全 GNSS SOL 的安装角中位数覆盖逻辑（丢前 10%，roll=0）。
+  - 重新导出 `output/html/representative_navigation_interactive_report.html`。
+- changed_files:
+  - `output/review/EXP-20260310-mounting-median-r1/cfg_data2_baseline_true_iekf_full.yaml`
+  - `output/review/EXP-20260310-mounting-median-r1/SOL_data2_baseline_true_iekf_full.txt`
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260310-mounting-median-r1/cfg_data2_baseline_true_iekf_full.yaml`
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/cfg_with_vel.yaml`（data4 全 GNSS true_iekf）
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-mounting-median-r1/cfg_data2_baseline_true_iekf_full.yaml`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/review/EXP-20260310-mounting-median-r1/SOL_data2_baseline_true_iekf_full.txt`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - data2 安装角中位数（丢前10%，roll=0）：pitch `-0.242531` deg, yaw `-2.367232` deg（n=482576）
+  - data4 安装角中位数（丢前10%，roll=0）：pitch `-0.373802` deg, yaw `1.358720` deg（n=398198）
+- observability_notes:
+  - 本会话仅更新 v 系真值基准计算，不涉及可观性结论更新。
+- decision:
+  - v 系真值与估计统一使用“全 GNSS true_iekf 安装角中位数”作为 base mounting，丢弃前10%样本，roll 固定 0。
+- next_step:
+  - 人工检查新版 HTML 中 v 系速度/航向误差的整体趋势是否符合预期。
+
+### session_id: 20260310-1558-html-mounting-note
+
+- timestamp: 2026-03-10 15:58 (local)
+- objective: 在 HTML 报告中加入 v 系真值基准安装角说明，便于审阅与对照。
+- scope:
+  - 为 HTML 导出增加“v系真值基准安装角说明”卡片，显示每个 case 的安装角来源与 rpy 数值。
+  - 重新导出 `output/html/representative_navigation_interactive_report.html`。
+- changed_files:
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本会话仅补充 HTML 说明，不涉及可观性结论更新。
+- decision:
+  - 报告中明确标注 v 系真值基准安装角的来源与数值，减少误读。
+- next_step:
+  - 人工确认各实验页面的安装角说明与期望一致。
+
+### session_id: 20260310-1643-inekf-mechanism-r1
+
+- timestamp: 2026-03-10 16:43 (local)
+- objective: 新增 InEKF 作用机理实验（第七/第八组），补齐 post-GNSS 漂移归因证据，并更新 HTML 报告。
+- scope:
+  - 运行 data4 GNSS30 true_iekf 的 freeze_mount 组，补齐三组对照。
+  - 新建 `inekf_mechanism_report.py`，生成 post-GNSS 指标表与机理摘要。
+  - 扩展交互报告新增第七/第八组并重新导出 HTML。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/inekf_mechanism_report.py`
+  - `output/review/EXP-20260310-inekf-mechanism-r1/SOL_data4_gnss30_true_freeze_mount.txt`
+  - `output/review/EXP-20260310-inekf-mechanism-r1/metrics.csv`
+  - `output/review/EXP-20260310-inekf-mechanism-r1/summary.md`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260310-inekf-mechanism-r1/cfg_data4_gnss30_true_{full,freeze_bg,freeze_mount}.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_{full,freeze_bg,freeze_mount}.yaml`（data2 复用）
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`
+- commands:
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-inekf-mechanism-r1/cfg_data4_gnss30_true_freeze_mount.yaml`
+  - `python scripts/analysis/inekf_mechanism_report.py`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/review/EXP-20260310-inekf-mechanism-r1/SOL_data4_gnss30_true_freeze_mount.txt`
+  - `output/review/EXP-20260310-inekf-mechanism-r1/metrics.csv`
+  - `output/review/EXP-20260310-inekf-mechanism-r1/summary.md`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - data2 post-GNSS：full slope `-16.90` deg/ks → freeze_bg `-5.29` deg/ks；freeze_mount `-17.23` deg/ks；bg_z 漂移 `2.293e-04` rad/s。
+  - data4 post-GNSS：full slope `-2.11` deg/ks → freeze_bg `-0.70` deg/ks；freeze_mount `-2.11` deg/ks；bg_z 漂移 `2.645e-05` rad/s。
+  - data4 ESKF vs true_iekf：去趋势 RMS `4.562 → 0.342` deg；data2 ESKF vs true_iekf：`3.286 → 1.204` deg。
+- observability_notes:
+  - post-GNSS 冻结作用于状态块 `bg` (12-14) 与 `mounting` (22-24)，调度窗口为 `gnss_schedule.head_ratio=0.3`。
+  - 冻结 `bg` 显著降低航向漂移斜率与残差 RMS，冻结 `mounting` 仅归零 mounting 漂移但对漂移斜率影响极小。
+  - 说明漂移主要由 `bg_z` 累积导致，mounting 更像次级放大通道。
+- decision:
+  - InEKF 在 GNSS 关闭后呈现更明显的“漂移主导”形态，且 data2 的漂移强度显著大于 data4；
+    bg_z 冻结是最有效的漂移抑制手段，mounting 冻结主要消除安装角通道但不足以改变漂移斜率。
+- next_step:
+  - 人工打开 HTML 报告确认第七/第八组曲线与指标表渲染正常，并把 summary.md 结论合并进最终实验叙述。
+
+
+### theme_04_data2_gnss30_nhc_sweep_chain | data2 GNSS30 的 NHC 频率扫描链
+
+#### session_ids_covered
+
+- `20260311-1051-odo-nhc-update-interval-audit`
+- `20260311-1413-odo-nhc-rate-sweep`
+- `20260311-1442-data2-gnss30-eskf-nhc-sweep`
+- `20260311-1511-data2-gnss30-true-iekf-nhc-sweep`
+- `20260311-1532-html-report-exp9-exp10`
+- `20260312-1010-inekf-mechanism-attribution-r1`
+- `20260312-1128-inekf-mechanism-r2-partial`
+
+#### complete_raw_blocks
+
+### session_id: 20260311-1051-odo-nhc-update-interval-audit
+
+- timestamp: 2026-03-11 10:51 (local)
+- objective: 明确当前工程里 ODO/NHC 的更新周期是默认值、配置值还是传感器原始频率驱动。
+- scope:
+  - 读取 `walkthrough.md`、`fusion.h`、`config.cpp`、`pipeline_fusion.cpp` 与主配置文件中的 `odo_min_update_interval` / `nhc_min_update_interval`。
+  - 抽查 `data2` 的 IMU / ODO 数据时间间隔，确认“0.0”配置在运行时的实际含义。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_baseline_eskf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+- commands:
+  - `Get-Content walkthrough.md -Head 80`
+  - `Get-ChildItem config_data2_*.yaml,config_data4_*.yaml,output\\review\\EXP-20260311-codefix-r1\\cfg_*.yaml | Select-String -Pattern 'odo_min_update_interval|nhc_min_update_interval'`
+  - `Get-Content include\\app\\fusion.h`
+  - `Get-Content src\\app\\config.cpp`
+  - `Get-Content src\\app\\pipeline_fusion.cpp`
+  - `Get-Content dataset\\data2_converted\\IMU_converted.txt -Head 3`
+  - `Get-Content dataset\\data2_converted\\ODO_converted.txt -Head 3`
+- artifacts:
+  - N/A
+- metrics:
+  - 代码默认值：`odo_min_update_interval = 0.02 s`，`nhc_min_update_interval = 0.02 s`
+  - 当前主配置实际值：全部主 `config_data2_*` / `config_data4_*` 与 `EXP-20260311-codefix-r1` 临时配置都写为 `0.0 s`
+  - data2 抽样时间间隔：IMU 约 `0.005 s`，ODO 约 `0.005 s`
+- observability_notes:
+  - 当前主配置下，ODO/NHC 未额外限频，约束等价于“尽可能按原始传感器频率更新”；仅在门控、ZUPT 互斥、速度阈值或数值拒绝时跳过。
+- decision:
+  - 当前工程口径下，ODO/NHC 的“更新周期”应表述为“最小更新间隔配置为 `0.0 s`，因此实际更新节奏由 IMU/ODO 原始时间戳驱动”，而不是固定 `50 Hz`。
+- next_step:
+  - 如需验证 codefix 后 baseline 漂移是否与约束频率有关，可将 `odo_min_update_interval` / `nhc_min_update_interval` 从 `0.0` 改为 `0.02` 做一组对照回归。
+
+### session_id: 20260311-1413-odo-nhc-rate-sweep
+
+- timestamp: 2026-03-11 14:13 (local)
+- objective: 对比不同 `ODO/NHC` 更新频率对当前 codefix 后 `data2 baseline ESKF` 结果的影响，确认 baseline 漂移是否与约束最小更新间隔有关。
+- scope:
+  - 新增可复现实验脚本 `scripts/analysis/odo_nhc_update_sweep.py`，支持 matched sweep 与 `ODO x NHC` 分离矩阵。
+  - 先计划运行 `data2 baseline ESKF` 与 `data2 GNSS30 true_iekf` 两个场景；实际因中途中断，先完整收口 `data2 baseline ESKF`。
+  - 对 `data2 baseline ESKF` 执行 matched sweep：`raw/100Hz/50Hz/20Hz/10Hz`，以及 matrix：`{raw,50Hz,20Hz} x {raw,50Hz,20Hz}`。
+- changed_files:
+  - `scripts/analysis/odo_nhc_update_sweep.py`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/manifest.json`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/plots/data2_baseline_eskf_matched_sweep.png`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/plots/data2_baseline_eskf_matrix_rmse3d.png`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/data2_baseline_eskf/cfg_*.yaml`
+- commands:
+  - `python -m py_compile scripts\analysis\odo_nhc_update_sweep.py`
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_baseline_eskf=config_data2_baseline_eskf.yaml --matched-intervals 0.0,0.02 --skip-matrix --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-smoke`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_baseline_eskf=config_data2_baseline_eskf.yaml --scenario data2_gnss30_true_iekf=config_data2_gnss30_true_iekf.yaml --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-r1`（中途被用户打断；仅 baseline case 落盘）
+  - `build\Release\eskf_fusion.exe --config output\review\EXP-20260311-odo-nhc-rate-sweep-r1\data2_baseline_eskf\cfg_matrix_odo_20hz_nhc_20hz.yaml`
+  - `python -`（基于已生成 `SOL_*.txt`/`*.log` 重建 `metrics.csv`、`summary.md`、`manifest.json` 与 plots）
+- artifacts:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/manifest.json`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/plots/data2_baseline_eskf_matched_sweep.png`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/plots/data2_baseline_eskf_matrix_rmse3d.png`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/data2_baseline_eskf/SOL_*.txt`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/data2_baseline_eskf/*.log`
+- metrics:
+  - matched sweep (`ODO=NHC`): raw/100Hz/50Hz/20Hz/10Hz RMSE3D=`1.492452/1.464603/1.426145/1.340378/1.284296` m。
+  - matched sweep accepted Hz: raw/raw `199.937/199.998`; 50Hz/50Hz `45.720/45.721`; 20Hz/20Hz `19.106/19.107`; 10Hz/10Hz `9.707/9.708`（ODO/NHC）。
+  - matrix best: `ODO raw + NHC 20Hz` RMSE3D=`1.225207` m, tail70 RMSE3D=`1.091301` m。
+  - matrix worst: `ODO 20Hz + NHC raw` RMSE3D=`1.548824` m, tail70 RMSE3D=`1.500544` m。
+  - raw/raw reference: RMSE xyz / 3D=`0.827032 0.877094 0.879851 / 1.492452`。
+- artifact_mtime:
+  - `scripts/analysis/odo_nhc_update_sweep.py`: `2026-03-11 11:01:30`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/metrics.csv`: `2026-03-11 14:12:54`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/summary.md`: `2026-03-11 14:12:54`
+- config_hash_or_mtime:
+  - `config_data2_baseline_eskf.yaml`: reused, not edited in session
+  - derived sweep configs: fresh generated under `output/review/EXP-20260311-odo-nhc-rate-sweep-r1/data2_baseline_eskf/`
+- dataset_time_window:
+  - data2 baseline: `528076.009368 -> 530488.900000`
+- result_freshness_check:
+  - pass（solver 先 fresh build；baseline `14/14` case 在本会话 fresh 生成或补跑；汇总文件在所有 baseline case 完成后重新生成）
+- observability_notes:
+  - 本轮未冻结或消融状态块 `21-30`，`fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*` 保持不变；改动仅在 `constraints.odo_min_update_interval` 与 `constraints.nhc_min_update_interval`。
+  - 从 schedule effect 看，保持 `ODO` 原始高频而将 `NHC` 从 raw 降到 `20Hz` 会改善 baseline ESKF；反过来降低 `ODO` 而保持 `NHC` raw 会恶化。
+  - 因此当前证据更像是 `NHC` 高密度更新在该数据/口径下更易放大误差，而 `ODO` 高频前向速度约束仍提供有效稳定信息。
+- decision:
+  - 这轮实验已经回答了“频率是否影响结果”这个问题：会，而且影响具有明显 `ODO/NHC` 不对称性。
+  - 对当前 codefix 后 `data2 baseline ESKF`，简单把两者都限频会持续改善，但最佳不是“一起都降”，而是 `ODO raw + NHC 20Hz`；这几乎恢复到 pre-codefix baseline (`1.223243`) 的量级。
+  - 原计划中的 `data2 GNSS30 true_iekf` 扩展未完成，本次记录明确按 baseline-only 口径存档，避免误把未跑场景当作已有证据。
+- next_step:
+  - 先把同样的 sweep 扩展到 `config_data2_gnss30_true_iekf.yaml`，确认 `raw ODO + 20Hz NHC` 的优势是否在 sparse-GNSS 下仍成立；若成立，再决定是否把该频率组合作为新的 baseline runtime 口径候选。
+
+### session_id: 20260311-1442-data2-gnss30-eskf-nhc-sweep
+
+- timestamp: 2026-03-11 14:42 (local)
+- objective: 使用 `data2_GNSS30_eskf` 验证 `NHC` 继续降频是否还能改善结果，并在 `ODO=raw` 条件下定位更合理的 `NHC` 工作频率。
+- scope:
+  - 复用并扩展 `scripts/analysis/odo_nhc_update_sweep.py`，新增“固定 ODO / 固定 NHC”的单轴 sweep 模式。
+  - 在 `config_data2_gnss30_eskf_nofreeze.yaml` 上固定 `ODO=raw`，先做 `NHC=50/20/10/5/2/1Hz` 的粗扫。
+  - 根据粗扫结果再围绕 `50Hz` 附近做 `100/75/60/50/40/30/20Hz` 的局部细扫。
+- changed_files:
+  - `scripts/analysis/odo_nhc_update_sweep.py`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/manifest.json`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/manifest.json`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_eskf_nofreeze.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/cfg_*.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/data2_gnss30_eskf/cfg_*.yaml`
+- commands:
+  - `Get-Content walkthrough.md -Head 120`
+  - `Get-Content config_data2_gnss30_eskf_nofreeze.yaml`
+  - `python -m py_compile scripts\analysis\odo_nhc_update_sweep.py`
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_gnss30_eskf=config_data2_gnss30_eskf_nofreeze.yaml --matched-intervals 0.0 --skip-matrix --fixed-odo-interval 0.0 --nhc-sweep-intervals 0.02,0.05,0.1,0.2,0.5,1.0 --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_gnss30_eskf=config_data2_gnss30_eskf_nofreeze.yaml --matched-intervals 0.0 --skip-matrix --fixed-odo-interval 0.0 --nhc-sweep-intervals 0.01,0.0133333333,0.0166666667,0.02,0.025,0.0333333333,0.05 --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine`
+- artifacts:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/plots/data2_gnss30_eskf_fixed_odo_nhc_sweep.png`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/plots/data2_gnss30_eskf_fixed_odo_nhc_sweep.png`
+- metrics:
+  - raw/raw 参考：RMSE3D=`195.786001` m，tail70 RMSE3D=`234.006187` m，final err=`422.079330` m。
+  - 粗扫（`ODO=raw`）：`NHC=50/20/10/5/2/1Hz` 时 RMSE3D=`112.635659/117.465035/121.913750/185.751350/262.112664/353.196283` m。
+  - 细扫（`ODO=raw`）：`NHC=100/75/60/50/40/30/20Hz` 时 RMSE3D=`134.031334/125.905375/114.330334/112.635659/110.398047/101.122603/117.465035` m。
+  - 当前最佳点：`ODO raw + NHC 30Hz`，RMSE3D=`101.122603` m，较 raw/raw 改善 `-94.663397` m（约 `-48.35%`）。
+- artifact_mtime:
+  - `scripts/analysis/odo_nhc_update_sweep.py`: `2026-03-11 14:21:16`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/metrics.csv`: `2026-03-11 14:30:52`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/metrics.csv`: `2026-03-11 14:42:00`
+- config_hash_or_mtime:
+  - `config_data2_gnss30_eskf_nofreeze.yaml`: reused, not edited in session
+  - derived configs under both `r2/r2b` output dirs were fresh generated in session
+- dataset_time_window:
+  - data2 GNSS30 ESKF: `528076.009368 -> 530488.900000`，`fusion.gnss_schedule.head_ratio=0.30`
+- result_freshness_check:
+  - pass（solver 在本会话 fresh build；所有 `r2/r2b` case 与汇总文件均由本会话 fresh 生成）
+- observability_notes:
+  - 状态块 `21-30` 未冻结、未消融，`fusion.ablation.*` 与 `fusion.post_gnss_ablation.*` 保持不变；本轮只调 `constraints.nhc_min_update_interval`，`ODO` 保持 raw 更新。
+  - 传感器窗口为 `GNSS` 前 `30%` 有效、后 `70%` 关闭，`ODO/NHC` 全程开启；因此结果直接反映 sparse-GNSS 下 road-constraint 调度对状态约束强度的影响。
+  - 行为上，`NHC` 从 raw 降到 `30-50Hz` 明显 improved；继续降到 `20Hz` 以下则 degraded，说明 `data2 GNSS30 ESKF` 存在有限最优的 `NHC` 频率窗口，而不是单调“越低越好”。
+- decision:
+  - 对 `data2_GNSS30_eskf`，用户提出的“`NHC` 还可以继续降低”只在从 raw 降到中等频率这一段成立；继续降到 `20Hz` 以下后结果明显转差。
+  - 当前最合理的 runtime 候选是 `ODO raw + NHC 30Hz`，它不仅优于 raw/raw，也优于 `50Hz/40Hz/20Hz` 这些相邻设置。
+  - 这说明 baseline 与 GNSS30 场景的最佳 `NHC` 调度并不相同：baseline 更偏向 `20Hz`，而 `data2 GNSS30 ESKF` 更偏向 `30Hz`。
+- next_step:
+  - 先在 `25/30/35Hz` 再做一个窄范围确认，并与“保持 raw 频率但增大 `sigma_nhc_y/z`”做对照，区分是时间降采样收益还是权重减弱收益。
+
+### session_id: 20260311-1511-data2-gnss30-true-iekf-nhc-sweep
+
+- timestamp: 2026-03-11 15:11 (local)
+- objective: 在 `data2_gnss30_true_iekf` 上复现与 `data2_gnss30_eskf` 相同的 `NHC` 频率实验，检查 `true_iekf` 是否共享相同的最优 `NHC` 调度窗口。
+- scope:
+  - 复用已扩展的 `scripts/analysis/odo_nhc_update_sweep.py`，固定 `ODO=raw`。
+  - 先做 `NHC=50/20/10/5/2/1Hz` 的粗扫。
+  - 根据粗扫结果继续向 `1Hz` 以下做 refine：`2/1.333/1/0.75/0.667/0.5/0.333/0.25Hz`。
+- changed_files:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/manifest.json`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/manifest.json`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/cfg_*.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/data2_gnss30_true_iekf/cfg_*.yaml`
+- commands:
+  - `Get-Content walkthrough.md -Head 120`
+  - `Get-Content config_data2_gnss30_true_iekf.yaml`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_gnss30_true_iekf=config_data2_gnss30_true_iekf.yaml --matched-intervals 0.0 --skip-matrix --fixed-odo-interval 0.0 --nhc-sweep-intervals 0.02,0.05,0.1,0.2,0.5,1.0 --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf`
+  - `python scripts\analysis\odo_nhc_update_sweep.py --scenario data2_gnss30_true_iekf=config_data2_gnss30_true_iekf.yaml --matched-intervals 0.0 --skip-matrix --fixed-odo-interval 0.0 --nhc-sweep-intervals 0.5,0.75,1.0,1.3333333333,1.5,2.0,3.0,4.0 --outdir output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine`
+- artifacts:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/plots/data2_gnss30_true_iekf_fixed_odo_nhc_sweep.png`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/metrics.csv`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/summary.md`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/plots/data2_gnss30_true_iekf_fixed_odo_nhc_sweep.png`
+- metrics:
+  - raw/raw 参考：RMSE3D=`165.542267` m，tail70 RMSE3D=`197.857600` m，final err=`431.801561` m。
+  - 粗扫（`ODO=raw`）：`NHC=50/20/10/5/2/1Hz` 时 RMSE3D=`120.821842/88.149809/65.215814/44.939188/27.344130/25.790653` m。
+  - refine（`ODO=raw`）：`NHC=2/1.333/1/0.75/0.667/0.5/0.333/0.25Hz` 时 RMSE3D=`27.344130/22.210205/25.790653/21.656987/22.295462/22.666655/23.466039/23.834721` m。
+  - 当前最佳点：`ODO raw + NHC 0.75Hz`，RMSE3D=`21.656987` m，较 raw/raw 改善 `-143.885279` m（约 `-86.92%`）。
+- artifact_mtime:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/metrics.csv`: `2026-03-11 14:57:46`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/metrics.csv`: `2026-03-11 15:10:47`
+- config_hash_or_mtime:
+  - `config_data2_gnss30_true_iekf.yaml`: reused, not edited in session
+  - derived configs under both `r3/r3b` output dirs were fresh generated in session
+- dataset_time_window:
+  - data2 GNSS30 true_iekf: `528076.009368 -> 530488.900000`，`fusion.gnss_schedule.head_ratio=0.30`
+- result_freshness_check:
+  - pass（solver 为当前 workspace build；所有 `r3/r3b` case 与汇总文件均在本会话 fresh 生成）
+- observability_notes:
+  - 本轮未改动 `fusion.ablation.*`、`fusion.post_gnss_ablation.*` 或 `21-30` 状态块冻结，仅调整 `constraints.nhc_min_update_interval`；`ODO` 保持 raw 更新。
+  - 在相同 sparse-GNSS 窗口下，`true_iekf` 对 `NHC` 约束带宽的偏好与 `ESKF` 显著不同：`ESKF` 最优在 `30Hz` 左右，而 `true_iekf` 最优已下探到 `0.75Hz` 附近。
+  - 该结果说明 road-constraint 的“有效注入节奏”与滤波器结构耦合很强，不能假设两种算法共享同一最佳 `NHC` 更新频率。
+- decision:
+  - `data2_gnss30_true_iekf` 上，做“与 ESKF 相同的实验”后得到的结论非常强：`NHC` 高频对 true_iekf 明显过强，持续下采样会大幅改善结果，直到约 `0.75Hz` 左右达到最佳。
+  - 同一数据、同一 GNSS 调度下，`true_iekf` 的最佳 `NHC` 频段比 `ESKF` 低了约两个数量级，这已经足以说明当前最优调度不是算法无关的。
+  - 当前 `data2_gnss30_true_iekf` 的最佳 runtime 候选可先记为 `ODO raw + NHC 0.75Hz`。
+- next_step:
+  - 先在 `0.6/0.75/0.9Hz` 左右做窄范围确认，并与“保持 NHC raw 但增大 `sigma_nhc_y/z`”对照，确认 true_iekf 的收益究竟来自时间降采样还是等效减权。
+
+### session_id: 20260311-1532-html-report-exp9-exp10
+
+- timestamp: 2026-03-11 15:32 (local)
+- objective: 将 `data2_GNSS30_eskf` 与 `data2_GNSS30_true_iekf` 的 NHC 扫频实验结果和分析写入 HTML 版结果报告，分别作为实验九和实验十。
+- scope:
+  - 按 `walkthrough.md` 现有实验链路复核 `EXP-20260311-odo-nhc-rate-sweep-r2/r2b/r3/r3b` 的关键指标与产物路径。
+  - 在 `scripts/analysis/interactive_nav_report.py` 中新增第九组、第十组的 `SectionSpec` 与代表性 case 选择。
+  - 在 `scripts/analysis/export_interactive_nav_report_html.py` 中补充实验九/十的分析卡片，并把侧边栏扩展到 `10` 页。
+  - fresh 重导出 `output/html/representative_navigation_interactive_report.html` 并做页面存在性核查。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/cfg_*.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/data2_gnss30_eskf/cfg_*.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/cfg_*.yaml`
+  - `output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/data2_gnss30_true_iekf/cfg_*.yaml`
+- commands:
+  - `Get-Content walkthrough.md -TotalCount 260`
+  - `Get-Content scripts\analysis\interactive_nav_report.py`
+  - `Get-Content scripts\analysis\export_interactive_nav_report_html.py`
+  - `Get-Content output\review\EXP-20260311-odo-nhc-rate-sweep-r{2,2b,3,3b}-*\summary.md`
+  - `Get-ChildItem output\review\EXP-20260311-odo-nhc-rate-sweep-r{2,2b,3,3b}-*\data2_* | Select-Object Name`
+  - `python -m py_compile scripts\analysis\interactive_nav_report.py scripts\analysis\export_interactive_nav_report_html.py`
+  - `python scripts\analysis\export_interactive_nav_report_html.py --target-points 1200`
+  - `python -`（检查 HTML 中 `nav-item/page-view` 数量、实验九/十标题与分析卡片片段）
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - HTML 交互报告由 `8` 页扩展为 `10` 页；核查结果 `nav_items/page_views = 10/10`。
+  - 实验九（`data2_GNSS30_eskf`）写入的代表性结果：raw/raw `195.786001` m，`NHC 50Hz` `112.635659` m，最优 `NHC 30Hz` `101.122603` m，`NHC 1Hz` `353.196283` m。
+  - 实验十（`data2_GNSS30_true_iekf`）写入的代表性结果：raw/raw `165.542267` m，`NHC 10Hz` `65.215814` m，`NHC 1Hz` `25.790653` m，最优 `NHC 0.75Hz` `21.656987` m。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-11 15:24:44`
+  - `scripts/analysis/export_interactive_nav_report_html.py`: `2026-03-11 15:25:28`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-11 15:31:46`
+- config_hash_or_mtime:
+  - 报告引用的 `r2/r2b/r3/r3b` sweep configs 均复用当日 fresh 产物；本会话未改底层求解配置，仅新增 HTML 引用与文字分析。
+- dataset_time_window:
+  - data2 GNSS30 referenced runs: `528076.009368 -> 530488.900000`，`fusion.gnss_schedule.head_ratio=0.30`
+- result_freshness_check:
+  - pass（HTML 在本会话 fresh 重导出；引用的 sweep 指标来自 2026-03-11 当日 fresh 生成的 `r2/r2b/r3/r3b` 产物）
+- observability_notes:
+  - 本会话未新增 `fusion.ablation.*` 或 `fusion.post_gnss_ablation.*`，状态块 `21-30` 仍按原 sweep 方案自由估计；报告仅总结 schedule effect。
+  - 传感器窗口保持 `GNSS` 前 `30%` 有效、后 `70%` 关闭，`ODO` 全程 raw，`NHC` 作为唯一 sweep 变量，因此实验九/十直接比较 `NHC` 更新节奏对后段可观性约束强度的影响。
+  - 行为结论在报告中明确写入：`data2 GNSS30 ESKF` 在约 `30Hz` improved、继续降到 `1Hz` degraded；`data2 GNSS30 true_iekf` 则在降到 `0.75Hz` 前持续 improved，显示最优 `NHC` 调度对滤波结构高度敏感。
+- decision:
+  - 保持现有 HTML 报告视觉与分页结构不变，仅扩展为实验九/十，避免重做整份报告版式。
+  - 报告正文现在已把 `ESKF` 与 `true_iekf` 在 `data2 GNSS30` 下截然不同的最优 `NHC` 频率窗口写成可直接审阅的图、表与文字分析。
+- next_step:
+  - 基于报告中当前最优点，先做 `ESKF 25/30/35Hz` 与 `true_iekf 0.6/0.75/0.9Hz` 的窄范围确认，再开展 tuned-vs-tuned 的跨滤波器对比。
+
+### session_id: 20260312-1010-inekf-mechanism-attribution-r1
+
+- timestamp: 2026-03-12 11:16 (local)
+- objective: 实现并执行 `process / ODO-NHC vel Jacobian / reset Gamma` 归因实验，解释 true_iekf 为何显著压低 `v系航向误差`，并补做 “降频 vs 放大 `sigma_nhc`” 的等效性对照。
+- scope:
+  - 在求解器中新增 3 组 debug 开关：`debug_force_process_model`、`debug_force_vel_jacobian`、`debug_disable_true_reset_gamma`。
+  - 在 `DiagnosticsEngine` 中新增 `enable_mechanism_log`，对 `ODO/NHC` 成功更新输出 post-GNSS 机制 CSV，记录 `K/H/S/dx` 与 heading-related information proxy。
+  - 新增 `scripts/analysis/inekf_mechanism_attribution.py`，fresh 跑 `data2/data4 GNSS30` 的 attribution matrix，并输出 `metrics.csv / summary.md / mechanism_math_note.md / per_update_stats.csv`；同时对 `data2` 补做 rate-vs-weight 对照。
+- changed_files:
+  - `include/core/eskf.h`
+  - `src/core/eskf_engine.cpp`
+  - `src/core/ins_mech.cpp`
+  - `src/core/measurement_models_uwb.cpp`
+  - `include/app/fusion.h`
+  - `src/app/config.cpp`
+  - `src/app/diagnostics.cpp`
+  - `src/app/pipeline_fusion.cpp`
+  - `scripts/analysis/inekf_mechanism_attribution.py`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_eskf_nofreeze.yaml`
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_gnss30_eskf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/cases/data{2,4}/cfg_*.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/metrics.csv`（rate summary 引用自同一脚本的 fresh case）
+- commands:
+  - `Get-Content walkthrough.md -TotalCount 220`
+  - `rg -n "enable_consistency_log|DiagnosticsEngine|InEkfConfig|mechanism" include src scripts -S`
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `python -m py_compile scripts\analysis\inekf_mechanism_attribution.py`
+  - `python scripts\analysis\inekf_mechanism_attribution.py --case-filter data2_true_tuned --output-dir output\review\_tmp_mech_smoke --rate-output-dir output\review\_tmp_mech_smoke_rate`
+  - `python scripts\analysis\inekf_mechanism_attribution.py`
+  - `python scripts\analysis\inekf_mechanism_attribution.py --case-filter data2_eskf_raw,data2_eskf_tuned,data2_eskf_raw_weight,data2_true_raw,data2_true_tuned,data2_true_raw_weight --output-dir output\review\_tmp_mech_ratefix --rate-output-dir output\review\EXP-20260312-inekf-mechanism-rate-vs-weight-r1`
+- artifacts:
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/metrics.csv`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/summary.md`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/mechanism_math_note.md`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/per_update_stats.csv`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/plots/*.png`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/cases/data{2,4}/SOL_*.txt`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/metrics.csv`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/summary.md`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/per_update_stats.csv`
+- metrics:
+  - data2 true tuned / `process=eskf` / `veljac=eskf` / `reset=I`:
+    RMSE3D=`21.656987/558.636121/21.656988/350.215138` m；
+    heading slope=`-1.480531/67.828521/-1.480531/43.661503` deg/ks。
+  - data4 true working / `process=eskf` / `veljac=eskf` / `reset=I`:
+    RMSE3D=`12.011497/320.995023/12.011497/284.796149` m；
+    heading slope=`-1.207022/16.220964/-1.207022/-23.721211` deg/ks。
+  - data2 rate-vs-weight:
+    ESKF raw/tuned/raw_weight RMSE3D=`195.786001/101.122603/74.794795` m，heading slope=`-10.769721/-5.178372/-1.560335` deg/ks；
+    true raw/tuned/raw_weight=`165.542267/21.656987/24.641456` m，heading slope=`-17.326579/-1.480531/-2.226295` deg/ks。
+  - mechanism information proxy:
+    data2 ESKF raw/tuned `6.375649e6 -> 9.121364e5` /s，data2 true raw/tuned `6.377126e6 -> 3.389010e4` /s；
+    true raw_weight 也降到 `3.152020e4` /s，和 tuned 同量级。
+- artifact_mtime:
+  - `scripts/analysis/inekf_mechanism_attribution.py`: `2026-03-12 11:03:39`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/metrics.csv`: `2026-03-12 11:02:40`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r1/summary.md`: `2026-03-12 11:02:40`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/metrics.csv`: `2026-03-12 11:16:16`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r1/summary.md`: `2026-03-12 11:16:16`
+- config_hash_or_mtime:
+  - 4 组基线 GNSS30 配置均复用既有文件，本会话未改 base config；
+  - attribution / rate case 的派生 `cfg_*.yaml` 由脚本在对应 `EXP-*` 目录下 fresh 生成；
+  - solver 与脚本逻辑修改集中在 `eskf_engine / ins_mech / measurement_models_uwb / diagnostics / config / pipeline_fusion / inekf_mechanism_attribution.py`。
+- dataset_time_window:
+  - data2 GNSS30 base IMU window: `527639.203184 -> 530492.825839`
+  - data4 GNSS30 base IMU window: `274900.204914 -> 277339.018817`
+  - 两组均使用 `fusion.gnss_schedule.head_ratio = 0.30`
+- result_freshness_check:
+  - pass（`eskf_fusion` 本会话 fresh build；`EXP-20260312-inekf-mechanism-attribution-r1` 的 14 个 case 与 `EXP-20260312-inekf-mechanism-rate-vs-weight-r1` 的 6 个 rate case 均在 2026-03-12 fresh 生成，汇总文件在所有目标 case 完成后重写）
+- observability_notes:
+  - 本轮未冻结 `21-30` 状态块，也未改 `fusion.ablation.*` / `fusion.post_gnss_ablation.*`；核心改动是 `fusion.fej.debug_*` 与 `constraints.enable_mechanism_log`。
+  - 传感器窗口保持 `GNSS` 前 30% 有效、后 70% 关闭，`ODO/NHC` 全程开启；机制日志默认仅记录 post-GNSS 的 `ODO/NHC` 成功更新。
+  - 对 Lie 核心行为的 fresh 证据是：
+    `process=eskf` 明显 degraded，`reset=I` 明显 degraded，而 `veljac=eskf` 基本 neutral；
+    因而当前 codepath 下 improved 的主因更接近 Lie-core propagation + reset consistency，而不是 `ODO/NHC` Jacobian 写法本身。
+  - 对更新节奏行为的 fresh 证据是：
+    `data2` 中无论 ESKF 还是 true_iekf，把单位时间 heading 信息注入强度压低都会 improved；
+    `raw + scaled sigma_nhc` 与 tuned 频率在信息率和结果上已接近，说明 schedule effect 很大一部分可解释为等效减权。
+- decision:
+  - 当前 true_iekf 相对 ESKF 的机制解释可以收敛为：
+    1) Lie-core process model 与 reset Gamma 是主要收益源；
+    2) `ODO/NHC` direct true-core Jacobian 与“加法 Jacobian 再变换到 true 坐标”在当前实现下几乎等价，不是主差异源；
+    3) `NHC` 降频带来的大部分收益，本质上是在控制单位时间 heading 相关信息注入强度。
+  - 对 data2 来说，若只关心效果而不执着于“必须降采样”，则 `raw + scaled sigma_nhc` 已能逼近甚至优于 tuned 频率；这为后续 runtime 设计提供了更平滑的工程选项。
+- next_step:
+  - 先补 `process=eskf + reset=I` 的联合 case，判断两者是近似可加还是存在强交互。
+  - 再对 data4 做最小化 tuned-vs-weight 对照，确认“降频≈减权”是否跨数据集成立。
+  - 最后把本轮结论同步回 `算法文档/可观性分析讨论与InEKF算法.tex` 与 HTML 交互报告，替换掉对 `ODO/NHC Jacobian` 的过度强调。
+
+### session_id: 20260312-1128-inekf-mechanism-r2-partial
+
+- timestamp: 2026-03-12 11:28 (local)
+- objective: 在 `r1` 的正式结论之上扩展 `r2`：补跑 `process=eskf + reset=I` 联合归因，补做 `data4` minimal ported rate-vs-weight，并把结果接入 HTML 报告分析卡片。
+- scope:
+  - 修改 `scripts/analysis/inekf_mechanism_attribution.py`，新增 `data2/data4` 的 `process=eskf + reset=I` case。
+  - 为 `data4` 增加 minimal ported rate-vs-weight：`ESKF 30Hz/raw+scaledR` 与 `true_iekf 0.75Hz/raw+scaledR`。
+  - 修改 `scripts/analysis/export_interactive_nav_report_html.py`，让 group7/group8/group9/group10 读取 `EXP-20260312-*-r2` metrics 后输出补充机制分析文字。
+  - 启动 `python scripts\analysis\inekf_mechanism_attribution.py` fresh 生成 `r2` 产物，但运行在首个 case 期间被用户主动中断。
+- changed_files:
+  - `scripts/analysis/inekf_mechanism_attribution.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_eskf_nofreeze.yaml`
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_gnss30_eskf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_eskf_raw.yaml`
+- commands:
+  - `Get-Content walkthrough.md -TotalCount 260`
+  - `Get-Content C:\Users\不存在的骑士\.codex\skills\using-superpowers\SKILL.md -TotalCount 220`
+  - `rg -n "EXP-20260312|Next Actions|session_id: 20260312|HYP-14|HYP-15|HYP-16" walkthrough.md`
+  - `python -m py_compile scripts\analysis\inekf_mechanism_attribution.py scripts\analysis\export_interactive_nav_report_html.py`
+  - `python scripts\analysis\inekf_mechanism_attribution.py`（用户中断）
+- artifacts:
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_eskf_raw.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/data2_eskf_raw.stdout.txt`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/SOL_data2_eskf_raw_mechanism.csv`
+  - `output/review/EXP-20260312-inekf-mechanism-rate-vs-weight-r2/`（空目录）
+- metrics:
+  - 本会话尚无任何 fresh 完成 case。
+  - `SOL_data2_eskf_raw_mechanism.csv` 仅包含 CSV header，无有效机制行；`data2_eskf_raw.stdout.txt` 长度为 `0`。
+- artifact_mtime:
+  - `scripts/analysis/inekf_mechanism_attribution.py`: fresh edited in session
+  - `scripts/analysis/export_interactive_nav_report_html.py`: fresh edited in session
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_eskf_raw.yaml`: `2026-03-12 11:26:42`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/SOL_data2_eskf_raw_mechanism.csv`: `2026-03-12 11:27:16`
+- config_hash_or_mtime:
+  - 4 组 GNSS30 基线配置均复用既有文件；`r2` 修改集中在分析脚本与 HTML 导出逻辑，未改求解器核心 C++。
+- dataset_time_window:
+  - intended: data2 GNSS30 `527639.203184 -> 530492.825839`
+  - intended: data4 GNSS30 `274900.204914 -> 277339.018817`
+- result_freshness_check:
+  - interrupted_before_first_completed_case
+- observability_notes:
+  - `r2` 的设计目标未变：继续围绕 post-GNSS `v系航向误差`，区分 `process`、`reset Gamma` 与 `ODO/NHC Jacobian` 的主次，并用 `data4` ported rate-vs-weight 判断“降频≈减权”的跨数据集边界。
+  - 由于实验在首个 case 内被中断，本会话没有新增可用于更新 `HYP-8/HYP-14/HYP-15/HYP-16` 的 fresh 证据。
+- decision:
+  - 在 `r2` 正式跑完前，`EXP-20260312-*-r1` 仍是当前唯一可引用的正式机制证据。
+  - HTML 与 `.tex` 的结论更新暂缓到 `r2` 出数后统一写回，避免把“准备好的分析入口”误记为正式结论。
+- next_step:
+  - 直接重新执行 `python scripts\analysis\inekf_mechanism_attribution.py`，等 `r2` 完整生成 `metrics.csv` 后，再更新 `.tex`、HTML 和 `walkthrough.md` 的假设状态。
+
+
+### theme_05_report_delivery_evolution | 报告交付演进链（interactive html / dataset-partitioned html）
+
+#### session_ids_covered
+
+- `20260305-1611-automation-worktree-overview`
+- `20260306-1600-github-sync-current-work`
+- `20260307-1005-compress-walkthrough-and-github-sync`
+- `20260308-0039-result-docs-r1`
+- `20260308-0054-inekf-doc-typeset-r1`
+- `20260308-0059-inekf-doc-typeset-r2`
+- `20260308-0102-inekf-doc-typeset-r3`
+- `20260309-1049-inekf-doc-symbols-r1`
+- `20260309-1107-inekf-doc-compile-check`
+- `20260309-2328-interactive-report-notebook-r1`
+- `20260310-0014-interactive-report-html-fix`
+- `20260310-0039-interactive-report-html-restyle`
+- `20260310-0105-interactive-report-html-pdf-style`
+- `20260310-1654-interactive-report-drop-group3`
+- `20260310-1710-interactive-report-add-analysis`
+- `20260310-1826-interactive-report-renumber`
+- `20260310-1956-remove-imu-pages`
+- `20260310-2010-report-rename-cleanup`
+- `20260310-2015-imu-precision-report`
+- `20260310-2326-github-sync`
+- `20260311-0019-report-attitude-error-fix`
+- `20260311-0044-html-attitude-cn-audit`
+- `20260311-0104-html-accuracy-audit`
+
+#### complete_raw_blocks
+
+### session_id: 20260307-1005-compress-walkthrough-and-github-sync
+
+- timestamp: 2026-03-07 10:05 (local)
+- objective: 压缩 `walkthrough.md`、保留关键实验链路，并将当前未提交代码整理后同步到 GitHub。
+- scope:
+  - 将冗长 `Session Log` 压缩为阶段摘要，保留关键实验、关键结果、开放假设与下一步动作。
+  - 复核并提交当前代码改动，包括 `true_iekf` reset/测量模型修正、`gyro_bias` 消融支持，以及 `jacobian_audit` 构建入口。
+- changed_files:
+  - `CMakeLists.txt`
+  - `include/app/fusion.h`
+  - `src/app/config.cpp`
+  - `src/app/pipeline_fusion.cpp`
+  - `src/core/eskf_engine.cpp`
+  - `src/core/measurement_models_uwb.cpp`
+  - `apps/jacobian_audit_main.cpp`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_gnss30_true_iekf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - post-GNSS ablation config path 仍沿用现有 `fusion.post_gnss_ablation.*` 节点
+- commands:
+  - `git status --short --branch`
+  - `git diff --stat`
+  - `cmake --build build --config Release --target eskf_fusion jacobian_audit`
+  - `git add CMakeLists.txt include/app/fusion.h src/app/config.cpp src/app/pipeline_fusion.cpp src/core/eskf_engine.cpp src/core/measurement_models_uwb.cpp apps/jacobian_audit_main.cpp walkthrough.md`
+  - `git commit -m "Add jacobian audit and true IEKF reset updates"`
+  - `git push origin main`
+- artifacts:
+  - `build/Release/eskf_fusion.exe`
+  - `build/Release/jacobian_audit.exe`
+  - `walkthrough.md`
+- metrics:
+  - 本会话不新增导航性能指标；目标是文档压缩、构建确认与代码同步。
+- artifact_mtime:
+  - `walkthrough.md`: 2026-03-07
+  - `build/Release/eskf_fusion.exe`: fresh build in this session
+  - `build/Release/jacobian_audit.exe`: fresh build in this session
+- config_hash_or_mtime:
+  - 本会话未改主配置文件；代码改动作用于现有 `true_iekf` 与 ablation 配置路径。
+- dataset_time_window:
+  - N/A（本会话不新跑解算）
+- result_freshness_check:
+  - pass（本会话已完成文档压缩与本地 fresh build；远端同步在同一会话内执行）
+- observability_notes:
+  - 新增 `disable_gyro_bias`，直接对应状态块 `12-14`，用于 `fusion.ablation.*` 与 `fusion.post_gnss_ablation.*` 的后续冻结/可观性实验。
+  - `ApplyTrueInEkfReset` 补充 `kPos/kVel <- kAtt` 交叉项后，更贴近 true Lie-core reset 线性化；但本会话尚未给出新的性能结论。
+  - `jacobian_audit` 已成为后续审查 `measurement/update/reset/covariance` 一致性的基础入口。
+- decision:
+  - 文档层面改为“实验索引保留全量、会话日志压缩为阶段摘要 + 当前会话”的维护策略，减少噪声并保留追溯性。
+  - 当前代码可以先做构建确认并同步到远端；后续实验应围绕 `ApplyTrueInEkfReset` 与 covariance / cross-covariance 一致性继续推进。
+- next_step:
+  - 完成本次 build / commit / push 后，优先执行 reset/covariance consistency audit，并用 `disable_gyro_bias` 做 data2 post-GNSS 定位性验证。
+
+### session_id: 20260308-0039-result-docs-r1
+
+- timestamp: 2026-03-08 00:39 (local)
+- objective: 清理 `算法文档/结果文档` 中旧结果文档，并基于当前主口径实验产物重建 3 份正式 LaTeX 结果报告。
+- scope:
+  - 删除 `算法文档/结果文档` 中旧 `.tex/.pdf/.aux/.log/.out/.toc/.compile.log` 等未调试稿及副产物。
+  - 为 8 个实验组补齐/整理 11 张标准图（`01/02/02b/03/04/05/06/07/08/09/10`），统一归档到 `output/review/EXP-20260307-result-docs-r1/plots/`。
+  - 新建并编译 `ESKF_data4_base_GNSS30.tex`、`InEKF_ESKF.tex`、`InEKF_data2_freeze.tex`。
+- changed_files:
+  - `算法文档/结果文档/*`（旧结果文档及编译副产物清理）
+  - `算法文档/结果文档/ESKF_data4_base_GNSS30.tex`
+  - `算法文档/结果文档/InEKF_ESKF.tex`
+  - `算法文档/结果文档/InEKF_data2_freeze.tex`
+  - `算法文档/结果文档/ESKF_data4_base_GNSS30.pdf`
+  - `算法文档/结果文档/InEKF_ESKF.pdf`
+  - `算法文档/结果文档/InEKF_data2_freeze.pdf`
+  - `output/review/EXP-20260307-result-docs-r1/plots/*`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_full.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_mount.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg_mount.yaml`
+- commands:
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data4_baseline_eskf_doc.txt output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data4_gnss30_eskf_doc.txt output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data4_gnss30_true_iekf_doc.txt config_data4_gnss30_true_iekf.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data2_gnss30_eskf_ref.txt output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data2_gnss30_true_full_doc.txt output/review/20260306-phase2c-bg-freeze/cfg_full.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data2_gnss30_true_freeze_mount_doc.txt output/review/20260306-phase2c-bg-freeze/cfg_freeze_mount.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data2_gnss30_true_freeze_bg_doc.txt output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg.yaml`
+  - `python plot_navresult.py output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data2_gnss30_true_freeze_bg_mount_doc.txt output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg_mount.yaml`
+  - `python` 基于 `scripts.analysis.run_research_pipeline` 计算 current `data4_true`、`data2_eskf_ref`、`data2_true_full` 的精确 RMSE/P95/tail/final 指标
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error ESKF_data4_base_GNSS30.tex`
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error InEKF_ESKF.tex`
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error InEKF_data2_freeze.tex`
+- artifacts:
+  - `算法文档/结果文档/ESKF_data4_base_GNSS30.tex`
+  - `算法文档/结果文档/InEKF_ESKF.tex`
+  - `算法文档/结果文档/InEKF_data2_freeze.tex`
+  - `算法文档/结果文档/ESKF_data4_base_GNSS30.pdf`
+  - `算法文档/结果文档/InEKF_ESKF.pdf`
+  - `算法文档/结果文档/InEKF_data2_freeze.pdf`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_baseline_eskf/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_gnss30_eskf/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_gnss30_true_iekf/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_eskf_ref/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_full/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_mount/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_bg/*`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_bg_mount/*`
+- metrics:
+  - `ESKF_data4_base_GNSS30.tex`: data4 baseline/GNSS30 ESKF RMSE3D `0.929070/51.371318`，P95 `1.083456/111.887450`，tail70 `1.011770/61.398719`。
+  - `InEKF_ESKF.tex`: data4 GNSS30 ESKF vs current true_iekf RMSE3D `51.371318/23.144284`，P95 `111.887450/55.562597`，tail70 `61.398719/27.658891`，末时刻 3D `29.004030/55.640252`。
+  - `InEKF_data2_freeze.tex`: data2 true full/freeze_mount/freeze_bg/freeze_bg_mount RMSE3D `165.591644/145.828424/98.817682/56.032658`；yaw growth `-28.50/-28.66/-9.28/-9.17 deg`。
+  - 归因对照：data2 GNSS30 ESKF 参照 `127.618348 m`；data4 true full `23.144284 m`；data4 true no_gnss_vel `19.369316 m`。
+- artifact_mtime:
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_baseline_eskf`: `2026-03-08 00:26:33`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_gnss30_eskf`: `2026-03-08 00:30:21`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data4_gnss30_true_iekf`: `2026-03-08 00:30:32`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_eskf_ref`: `2026-03-08 00:30:44`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_full`: `2026-03-08 00:30:56`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_mount`: `2026-03-08 00:31:08`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_bg`: `2026-03-08 00:31:21`
+  - `output/review/EXP-20260307-result-docs-r1/plots/data2_gnss30_true_freeze_bg_mount`: `2026-03-08 00:31:33`
+  - `算法文档/结果文档/ESKF_data4_base_GNSS30.pdf`: `2026-03-08 00:38:13`
+  - `算法文档/结果文档/InEKF_ESKF.pdf`: `2026-03-08 00:38:30`
+  - `算法文档/结果文档/InEKF_data2_freeze.pdf`: `2026-03-08 00:39:08`
+- config_hash_or_mtime:
+  - 本会话未修改任何主配置；所有配置均为复用既有实验配置并显式写入报告正文。
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（8 组图像在本会话 fresh 整理，3 份 `.tex/.pdf` 在本会话 fresh 生成并编译通过）
+- observability_notes:
+  - `InEKF_data2_freeze.tex` 直接映射了 post-GNSS ablation 的状态块：`disable_gyro_bias -> 12-14`，`disable_mounting -> 22-24`。其中冻结 `12-14` 显著改善，冻结 `22-24` 为次级改善，二者叠加进一步改善。
+  - 传感器窗口保持 `fusion.gnss_schedule.head_ratio=0.3`：GNSS 仅在前 30% 时段有效，ODO/NHC 全程持续，因此图像与指标均在“GNSS 关闭后约束如何维持解算”的可观性口径下解读。
+  - data4 true no_gnss_vel 仍可达到 `19.369316 m`，对“data2 弱于 data4 是否主要由缺少 GNSS 速度造成”给出负证据，说明主导差异更接近 `bg_z` 驱动的 heading drift 与 mounting 放大通道。
+- decision:
+  - 已完成旧结果目录清理，并按统一格式重建 3 份正式结果文档，满足“实验设置、量化指标、图像对比、实验结论”四段结构要求。
+  - 新报告统一按“同类型图像横向对照”排版，而不是按实验组整组堆叠，且通过拆分 figure 保证了 5 组冻结对照场景中的图像可读性。
+  - 文档层面的核心结论已稳定：data4 GNSS30 下 true_iekf 整体优于 ESKF；data2 GNSS30 的主残余问题是 post-GNSS `bg_z` 主导的 heading drift，mounting 漂移属于次级放大器，GNSS 速度缺失不是主导解释。
+- next_step:
+  - 人工审阅 3 份 PDF 的版式与图像可读性，若需要再针对个别图号做局部放大或分页微调。
+
+### session_id: 20260308-0054-inekf-doc-typeset-r1
+
+- timestamp: 2026-03-08 00:54 (local)
+- objective: 参照新结果文档的字体、行距和页边距风格，优化 `可观性分析讨论与InEKF算法.tex` 的整体版式，使算法文档更统一、更易读。
+- scope:
+  - 仅调整导言区与全局排版参数，不改正文推导内容与章节结构。
+  - 统一页边距、行距、标题层级间距、图注与列表间距，并保留原有 `tcolorbox`、定理和公式环境。
+  - fresh 编译 `算法文档/可观性分析讨论与InEKF算法.pdf` 验证版式兼容性。
+- changed_files:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `walkthrough.md`
+- configs:
+  - N/A（文档排版任务）
+- commands:
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error 可观性分析讨论与InEKF算法.tex`
+- artifacts:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+- metrics:
+  - 文档编译通过，输出 `22` 页 PDF。
+  - 版式参数更新：页边距 `left/right=2.3 cm`, `top/bottom=2.2 cm`；行距 `1.18`；表格 `arraystretch=1.15`。
+- artifact_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`: `2026-03-08 00:53:32`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`: `2026-03-08 00:53:52`
+- config_hash_or_mtime:
+  - N/A（本会话不涉及实验配置）
+- dataset_time_window:
+  - N/A
+- result_freshness_check:
+  - pass（`.tex` 已修改且 `.pdf` 在本会话 fresh 编译生成）
+- observability_notes:
+  - 本会话仅优化文档排版，不改变任何可观性结论、状态块分析或理论推导。
+  - 文档内容仍围绕 `InEKF`、`FEJ-EKF` 与可观性结构误差展开，未引入新的实验口径。
+- decision:
+  - `可观性分析讨论与InEKF算法.tex` 已对齐到新结果文档的视觉风格：页边距更紧凑、行距更舒展、标题层级更清晰、图注和列表间距更统一。
+  - 采用 `ctexart` 后编译稳定，说明该算法文档可以与结果文档保持统一 LaTeX 风格继续维护。
+- next_step:
+  - 人工检查 `算法文档/可观性分析讨论与InEKF算法.pdf` 的目录页、彩色框和长公式分页观感；如需进一步精修，再针对个别章节做局部标题/框体微调。
+
+### session_id: 20260308-0059-inekf-doc-typeset-r2
+
+- timestamp: 2026-03-08 00:59 (local)
+- objective: 在首轮排版统一基础上做第二轮精修，重点解决“字号略大于结果文档”的问题，并进一步优化标题页、目录、图注和框体疏密。
+- scope:
+  - 将 `可观性分析讨论与InEKF算法.tex` 的字号由 `12pt` 调整为与结果文档一致的 `10pt`。
+  - 进一步收紧正文行距与段间距，优化标题页垂直留白，并统一图注 skip 与 `tcolorbox` 前后间距。
+  - fresh 编译 PDF，检查页数变化与 warning 情况。
+- changed_files:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `walkthrough.md`
+- configs:
+  - N/A（文档排版任务）
+- commands:
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error 可观性分析讨论与InEKF算法.tex`
+- artifacts:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+- metrics:
+  - 文档编译通过，输出 `17` 页 PDF。
+  - 版式参数更新：字号 `10pt`；行距 `1.14`；段间距 `0.25em`；图注 skip 统一为 `6pt`。
+- artifact_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`: `2026-03-08 00:58:45`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`: `2026-03-08 00:58:58`
+- config_hash_or_mtime:
+  - N/A（本会话不涉及实验配置）
+- dataset_time_window:
+  - N/A
+- result_freshness_check:
+  - pass（`.tex` 已在本会话再次修改且 `.pdf` 已 fresh 编译生成）
+- observability_notes:
+  - 本会话继续只做排版精修，不改变任何可观性分析、状态块解释或 InEKF 理论结论。
+  - 缩小字号后页数由 `22` 收敛到 `17`，更接近结果文档的紧凑风格，同时保留长公式与彩色框的可读性。
+- decision:
+  - 算法文档当前已与结果文档的视觉风格更接近：字号一致、页边距一致、整体更紧凑，用户此前感受到的“字号偏大”问题已直接处理。
+  - 现阶段不继续做更强的结构改写，只保留必要的轻量 warning（主要来自章节标题中的数学符号 PDF string 处理）。
+- next_step:
+  - 如仍需更精细美化，可下一轮针对目录样式、表格宽度或特定长公式分页做局部定制。
+
+### session_id: 20260308-0102-inekf-doc-typeset-r3
+
+- timestamp: 2026-03-08 01:02 (local)
+- objective: 继续对 `可观性分析讨论与InEKF算法.tex` 做局部美化，重点优化目录页、标题页、彩色框、表格/公式疏密以及带数学符号的目录书签。
+- scope:
+  - 引入 `tocloft` / `etoolbox` 做目录样式与表格字号微调。
+  - 为含数学符号的 `section/subsection/subsubsection` 标题加入 `\texorpdfstring`，消除 PDF 书签中的数学警告并改善书签可读性。
+  - 调整 `\contentsname`、标题页副标题、`tcolorbox` 前后间距、长公式分页和表格字号。
+  - 用 `pdftoppm` 将前两页渲染为 PNG，做标题页与目录页的版式核查。
+- changed_files:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-01.png`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-02.png`
+  - `walkthrough.md`
+- configs:
+  - N/A（文档排版任务）
+- commands:
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error 可观性分析讨论与InEKF算法.tex`
+  - `pdftoppm -f 1 -l 2 -png 可观性分析讨论与InEKF算法.pdf tmp/pdfs/inekf_doc_review/page`
+- artifacts:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-01.png`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-02.png`
+- metrics:
+  - 文档编译通过，输出 `16` 页 PDF。
+  - 继续保留 `10pt` 正文字号，目录与标题页进一步收紧；前两页 PNG 渲染成功，可用于后续人工复核。
+- artifact_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`: `2026-03-08 01:01:48` 
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`: `2026-03-08 01:02:36`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-01.png`: `2026-03-08 01:02:36`
+  - `算法文档/tmp/pdfs/inekf_doc_review/page-02.png`: `2026-03-08 01:02:36`
+- config_hash_or_mtime:
+  - N/A（本会话不涉及实验配置）
+- dataset_time_window:
+  - N/A
+- result_freshness_check:
+  - pass（`.tex`、`.pdf` 以及前两页 PNG 均在本会话 fresh 生成）
+- observability_notes:
+  - 本会话仍仅涉及文档排版，不修改可观性分析结论、状态块解释或 InEKF 理论推导。
+  - 通过 `\texorpdfstring` 处理 `SE_2(3)`、`F`、`A_c` 等标题内数学符号后，目录书签的可读性更好，避免了之前的 PDF string 警告。
+- decision:
+  - 算法文档已完成第三轮局部美化，当前风格已与结果文档基本统一，并且标题页、目录页、表格和盒子环境的观感更精致。
+  - 后续若还需要继续优化，宜转向“个别页面的定制修饰”，而不是再做全局参数变更。
+- next_step:
+  - 若用户继续要求美化，优先针对个别表格宽度、特定长公式分页或个别彩色框的页内断点做点状修饰。
+
+### session_id: 20260309-1049-inekf-doc-symbols-r1
+
+- timestamp: 2026-03-09 10:55 (local)
+- objective: 在 `可观性分析讨论与InEKF算法.tex` 正文前补足“符号说明”前置章节，并让其不占用正文编号。
+- scope:
+  - 将原有 `\section{符号说明}` 改为前置未编号章节，保留目录入口但不影响正文节号。
+  - 补充 IMU 偏置/比例因子、ZUPT/NHC/ODO/UWB/GNSS 量测记号，以及 31 维状态块的 1-based 对应表。
+  - fresh 编译 `.pdf` 并核对 `.toc`，确认“符号说明”进入目录且 `引言` 恢复为第 `1` 节。
+- changed_files:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/可观性分析讨论与InEKF算法.toc`
+  - `walkthrough.md`
+- configs:
+  - N/A（文档结构任务）
+- commands:
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error 可观性分析讨论与InEKF算法.tex`
+- artifacts:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/可观性分析讨论与InEKF算法.toc`
+- metrics:
+  - 文档编译通过，输出 `17` 页 PDF。
+  - 目录包含 `符号说明`，且 `引言` 在目录中恢复为第 `1` 节。
+- artifact_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.tex`: `2026-03-09 10:54:35`
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`: `2026-03-09 10:54:52`
+  - `算法文档/可观性分析讨论与InEKF算法.toc`: `2026-03-09 10:54:50`
+- config_hash_or_mtime:
+  - N/A（本会话不涉及实验配置）
+- dataset_time_window:
+  - N/A
+- result_freshness_check:
+  - pass（`.tex`、`.pdf`、`.toc` 均在本会话 fresh 生成）
+- observability_notes:
+  - 新增的 `31维状态块对应` 明确了 Lie 核心、`b_a/b_g`、`s_g/s_a`、`odo_scale`、`mounting`、`lever_odo`、`lever_gnss` 的符号与维度，对应本文后续的状态块可观性讨论。
+  - 本会话仅整理前置说明，不改变任何可观性结论、实验指标或 InEKF 理论推导。
+- decision:
+  - `符号说明` 现已成为真正的前置章节：目录可见，但不会把正文 `引言` 挤成第 `2` 节。
+  - 文档前部现在同时覆盖数学记号、导航状态、31 维状态块与量测缩写，适合作为后续阅读入口。
+- next_step:
+  - 人工检查 `算法文档/可观性分析讨论与InEKF算法.pdf` 的目录页和新增符号说明页，确认表格换页、标题层级和页内留白观感是否还需微调。
+
+### session_id: 20260309-1107-inekf-doc-compile-check
+
+- timestamp: 2026-03-09 11:07 (local)
+- objective: 检查 `可观性分析讨论与InEKF算法.tex` 是否存在实际编译问题，并确认当前文档在本机 TeX 环境下的可复现性。
+- scope:
+  - 直接在 `算法文档/` 目录运行 `latexmk -xelatex -interaction=nonstopmode -halt-on-error` 复现编译过程。
+  - 检查首轮日志中的交叉引用 warning 是否在后续轮次自动消失。
+  - 复核 VS Code 对 `.tex` 文件的即时诊断结果，确认是否存在语法级错误。
+- changed_files:
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/可观性分析讨论与InEKF算法.aux`
+  - `算法文档/可观性分析讨论与InEKF算法.log`
+  - `算法文档/可观性分析讨论与InEKF算法.toc`
+  - `算法文档/可观性分析讨论与InEKF算法.xdv`
+  - `walkthrough.md`
+- configs:
+  - N/A（文档编译检查任务）
+- commands:
+  - `latexmk -xelatex -interaction=nonstopmode -halt-on-error 可观性分析讨论与InEKF算法.tex`
+  - VS Code Problems check on `算法文档/可观性分析讨论与InEKF算法.tex`
+- artifacts:
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`
+  - `算法文档/可观性分析讨论与InEKF算法.log`
+  - `算法文档/可观性分析讨论与InEKF算法.toc`
+- metrics:
+  - `latexmk` 成功完成 `2` 轮 `xelatex` 与 `1` 轮 `xdvipdfmx`。
+  - 最终输出 `17` 页 PDF，`340221 bytes`。
+  - 首轮出现的 `undefined references` 属于目录与交叉引用尚未写回时的正常现象；第二轮后已消失。
+  - VS Code 对该 `.tex` 文件返回 `No errors found`。
+- artifact_mtime:
+  - `算法文档/可观性分析讨论与InEKF算法.pdf`: fresh build in this session
+  - `算法文档/可观性分析讨论与InEKF算法.log`: fresh build in this session
+  - `算法文档/可观性分析讨论与InEKF算法.toc`: fresh build in this session
+- config_hash_or_mtime:
+  - N/A（本会话不涉及实验配置）
+- dataset_time_window:
+  - N/A
+- result_freshness_check:
+  - pass（`.pdf/.log/.toc` 均由本会话 fresh 编译生成）
+- observability_notes:
+  - 本会话仅验证文档编译链路，不修改任何可观性分析、状态块解释或 InEKF 理论推导。
+  - 首轮 `eq:*` 与 `sec:*` 的未定义引用 warning 来自 LaTeX 多轮编译机制，而非标签丢失；对应标签在源文件中均存在并于第二轮正确解析。
+- decision:
+  - 当前 `可观性分析讨论与InEKF算法.tex` 在本机 TeX Live 2025 + `latexmk/xelatex` 环境下可正常编译，不存在阻断性编译错误。
+  - 若用户在编辑器里看到“未定义引用”，应优先区分是单轮编译造成的瞬时 warning，还是最终 `latexmk` 结果中的真实残留问题。
+- next_step:
+  - 如后续仍报告“编译失败”，优先收集用户使用的具体编译命令或 LaTeX Workshop 配置，判断是否是单轮 `xelatex`、错误引擎或工作目录不一致导致的环境型问题。
+
+### session_id: 20260309-2328-interactive-report-notebook-r1
+
+- timestamp: 2026-03-09 23:28 (local)
+- objective: 基于 Plotly 与 Jupyter 为 3 组代表性实验构建交互式分析笔记，统一查看轨迹、n系速度误差、v系速度误差、v系航向误差、pitch/roll 误差与高程误差。
+- scope:
+  - 新增可复用分析模块 `scripts/analysis/interactive_nav_report.py`，负责读取既有 `SOL/truth/config`、对齐误差并生成 Plotly 图表与统计表。
+  - 新增 notebook `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`，仅保留加载、构建报告、渲染结果三步，避免把分析逻辑散落在 `.ipynb` 中。
+  - 全程复用既有求解产物，不新增 solver run；对 data2 无表头 `POS_converted.txt` 兼容处理后完成 smoke test。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `config_data4_gnss30_true_iekf.yaml`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_full.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_mount.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg.yaml`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg_mount.yaml`
+- commands:
+  - `python "C:/Users/不存在的骑士/.codex/skills/jupyter-notebook/scripts/new_notebook.py" --kind experiment --title "组合导航代表性实验交互分析" --out "D:/因子图算法科研训练/UWB/output/jupyter-notebook/representative_navigation_interactive_report.ipynb"`
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py`
+  - `python scripts/analysis/interactive_nav_report.py --target-points 1200`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+- metrics:
+  - 第一组（data4 baseline ESKF vs GNSS30 ESKF）复核 RMSE3D `0.929070/51.371318`，GNSS cutoff `609.0 s`。
+  - 第二组（data4 GNSS30 ESKF vs true_iekf）复核 RMSE3D `51.371318/23.144284`，GNSS cutoff `609.0 s`。
+  - 第三组（data2 ESKF 参考 + full/freeze_mount/freeze_bg/freeze_bg_mount）复核 RMSE3D `127.618348/165.591644/145.828424/98.817682/56.032658`，GNSS cutoff `725.042 s`。
+  - notebook 对每个误差通道统一输出 `mean / rmse / p95_abs / max_abs / final` 五类统计值，覆盖 `n系速度误差`、`v系速度误差`、`v系航向误差`、`pitch/roll` 与 `高程误差`。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-09 23:27:17`
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`: `2026-03-09 23:24:41`
+- config_hash_or_mtime:
+  - 本会话未修改任何实验配置；全部复用既有报告口径配置，仅新增交互式读取与可视化层。
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（交互分析模块在本会话 fresh 生成，并通过 smoke test 复核出与正式报告一致的 RMSE3D；未新增 solver 输出，但所有 notebook 输入路径均显式记录且可复现）
+- observability_notes:
+  - 调度效应继续按代码真实顺序解读：IMU 预测、ZUPT、重力对准诊断、NHC、ODO、UWB、GNSS、诊断记录；其中本 notebook 重点观察 GNSS 头窗口结束后的误差增长。
+  - 第一组只改 `fusion.gnss_schedule.*`：data4 从全程 GNSS 切到前 30% GNSS 后，n系/v系速度误差、v系航向误差与高程误差在后段整体劣化，用于建立 schedule 退化基线。
+  - 第二组保持同一 GNSS30 窗口，对比 ESKF 与 true_iekf；在相同 ODO/NHC 活跃窗口下，true_iekf 的整体误差曲线与统计值更优，可直接用于 post-GNSS 可观性保持能力对照。
+  - 第三组直接映射 post-GNSS ablation 状态块：`disable_gyro_bias -> 12-14`，`disable_mounting -> 22-24`。`freeze_bg` 对 v系航向误差与速度误差改善显著，`freeze_mount` 仅次级改善，`freeze_bg_mount` 最优，符合“`bg_z` 主导 heading drift、mounting 为放大器”的既有判断。
+- decision:
+  - 已完成一个“薄 notebook + 厚模块”的交互分析方案：notebook 负责展示，分析逻辑集中在 Python 模块，后续扩展新的实验组时只需补 `REPORT_SECTIONS`。
+  - 新模块已兼容 data2 无表头真值文件，并通过 CLI smoke test 成功复核 3 组代表性实验的核心 RMSE 指标，说明该交互笔记可直接作为后续问题分析入口。
+- next_step:
+  - 在 `output/jupyter-notebook/representative_navigation_interactive_report.ipynb` 中实际执行并人工审图，优先检查 GNSS cutoff 后 `v系` 速度误差、v系航向误差与 `pitch/roll`、高程误差是否呈同步放大，再决定是否扩展到更多冻结矩阵或新的调度窗口。
+
+### session_id: 20260310-0014-interactive-report-html-fix
+
+- timestamp: 2026-03-10 00:14 (local)
+- objective: 修复交互 notebook 的中文编码与运行入口问题，并额外导出一个可直接分享的单文件 HTML 交互报告。
+- scope:
+  - 将 `output/jupyter-notebook/representative_navigation_interactive_report.ipynb` 重写为 UTF-8 无 BOM 的原始 JSON，去掉损坏的中文与残留执行输出。
+  - 新增 `scripts/analysis/export_interactive_nav_report_html.py`，将既有 Plotly 图和统计表打包为单个自包含 HTML 文件。
+  - 复核 notebook 中文内容、HTML 导出成功路径，并记录“避免通过 `python -` 写中文 notebook”的维护提醒。
+- changed_files:
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `walkthrough.md`
+- configs:
+  - 同 `EXP-20260309-interactive-report-notebook-r1`：`output/review/EXP-20260305-data4-main4-regression-r1/cfg_{baseline_eskf,gnss30_eskf}.yaml`; `config_data4_gnss30_true_iekf.yaml`; `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`; `output/review/20260306-phase2c-bg-freeze/cfg_{full,freeze_mount,freeze_bg,freeze_bg_mount}.yaml`
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+  - JSON / UTF-8 validation on `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+- artifacts:
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 单文件 HTML 大小 `7999646 bytes`。
+  - HTML 继续复用 3 组实验的既有核心指标：data4 baseline/GNSS30 ESKF RMSE3D `0.929070/51.371318`，data4 GNSS30 true_iekf `23.144284`，data2 ESKF/full/freeze_mount/freeze_bg/freeze_bg_mount `127.618348/165.591644/145.828424/98.817682/56.032658`。
+  - notebook 中文首单元已能按 UTF-8 正确读回，且 JSON 解析通过。
+- artifact_mtime:
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`: `2026-03-10 00:13:11`
+  - `scripts/analysis/export_interactive_nav_report_html.py`: `2026-03-10 00:11:58`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-10 00:14:03`
+- config_hash_or_mtime:
+  - 本会话未修改实验配置，仍完全复用既有 3 组代表性实验输入。
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（HTML 在本会话 fresh 生成；notebook 已改为 UTF-8 无 BOM 并重新校验；无需新增 solver 运行即可复用现有结果）
+- observability_notes:
+  - 本会话不改变任何实验结论，只修复结果呈现与分享方式。
+  - 单文件 HTML 仍按同一 3 组实验口径展示 post-GNSS 误差增长、`freeze_bg` 对航向相关误差的改善，以及 data4/data2 在调度窗口后的差异。
+- decision:
+  - 当前对外分享的首选产物应改为 `output/html/representative_navigation_interactive_report.html`；它是单文件、已嵌入 Plotly 与数据，不需要再附带原始结果目录。
+  - notebook 保留为本地分析入口，但其内容写入今后必须避开 `python -` 这类可能走本地 codepage 的链路，统一改用 UTF-8 直接文件写入。
+- next_step:
+  - 先人工打开 `output/html/representative_navigation_interactive_report.html` 检查浏览器中的交互体验与排版，再决定是否继续对 HTML 做章节精简或摘要强化。
+
+### session_id: 20260310-0039-interactive-report-html-restyle
+
+- timestamp: 2026-03-10 00:39 (local)
+- objective: 将单文件 HTML 交互报告重构为更接近 IEEE / Claude 的简约风格，并修复离线场景下公式标签显示为 LaTeX 原码的问题。
+- scope:
+  - 调整 `scripts/analysis/interactive_nav_report.py` 的 Plotly 主题：细线、低饱和蓝绿灰配色、浅色网格、衬线标题与无外链公式依赖的标签记法。
+  - 重写 `scripts/analysis/export_interactive_nav_report_html.py` 的页面布局与 CSS，改为浅背景、细边框、目录导航、统一 plot/table card 的单文件 HTML 设计。
+  - fresh 导出 `output/html/representative_navigation_interactive_report.html`，并用文本检索确认已无原始 `$...$` 标签残留。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - 同 `EXP-20260309-interactive-report-notebook-r1`：`output/review/EXP-20260305-data4-main4-regression-r1/cfg_{baseline_eskf,gnss30_eskf}.yaml`; `config_data4_gnss30_true_iekf.yaml`; `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`; `output/review/20260306-phase2c-bg-freeze/cfg_{full,freeze_mount,freeze_bg,freeze_bg_mount}.yaml`
+- commands:
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py`
+  - `python -m py_compile scripts/analysis/export_interactive_nav_report_html.py`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+  - `rg -n "北向速度误差 \$v_n\$|前向速度误差 \$v_x\^v\$|横向速度误差 \$v_y\^v\$|垂向速度误差 \$v_z\^v\$" output/html/representative_navigation_interactive_report.html`
+  - `rg -n "<sub>n</sub>|<sub>x</sub><sup>v</sup>|<sub>y</sub><sup>v</sup>|<sub>z</sub><sup>v</sup>" output/html/representative_navigation_interactive_report.html`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 单文件 HTML 大小 `8035988 bytes`。
+  - 原始 LaTeX 标签检索命中 `0`；`<sub>/<sup>` 离线符号标记已出现在图表 payload 与统计表中。
+  - 3 组实验的底层结果口径保持不变：data4 baseline/GNSS30 ESKF RMSE3D `0.929070/51.371318`，data4 GNSS30 true_iekf `23.144284`，data2 ESKF/full/freeze_mount/freeze_bg/freeze_bg_mount `127.618348/165.591644/145.828424/98.817682/56.032658`。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-10 00:37:08`
+  - `scripts/analysis/export_interactive_nav_report_html.py`: `2026-03-10 00:36:05`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-10 00:38:18`
+- config_hash_or_mtime:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`: `2026-03-05 17:09:26`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`: `2026-03-05 17:10:45`
+  - `config_data4_gnss30_true_iekf.yaml`: `2026-03-06 11:33:39`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`: `2026-03-05 00:32:21`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_full.yaml`: `2026-03-06 18:42:24`
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（HTML 与两份脚本均在本会话 fresh 生成/编译；仅重构呈现层，不改 solver 结果）
+- observability_notes:
+  - 本会话不改变任何可观性结论或状态块解释，只改善结果展示与离线分享体验。
+  - 为保持单文件离线可用性，符号从 MathJax/LaTeX 记法改为 HTML 上下标；这不会改变 `freeze_bg`、`freeze_mount` 与 GNSS 调度相关的误差统计和图形趋势。
+  - 编码维护提醒继续成立：涉及中文 notebook/markdown/html 写入时，必须使用 UTF-8 直接文件写入，避免 `python -` / stdin codepage 路径。
+- decision:
+  - `output/html/representative_navigation_interactive_report.html` 现在既是单文件自包含交付物，也是当前更适合对外分享的最终形态。
+  - 页面风格已从偏装饰型 warm hero 收敛到浅底、细线、低饱和配色的技术报告风格；后续如需再调，只建议做小幅排版微调而非改回依赖外链资源的方案。
+- next_step:
+  - 在真实浏览器里人工审阅一次新版 HTML 的视觉细节、滚动节奏和交互流畅度；若无明显问题，后续继续把它作为默认分享产物。
+
+### session_id: 20260310-0105-interactive-report-html-pdf-style
+
+- timestamp: 2026-03-10 01:05 (local)
+- objective: 继续收敛单文件 HTML 报告，使其更接近“可交互 PDF”的阅读体验：图像固定、纯白、无网格、细线、宋体/Times 字体，以及更清晰且不过度铺满页面的表格。
+- scope:
+  - 调整 `scripts/analysis/interactive_nav_report.py` 的 Plotly 图形主题，使坐标轴固定、背景纯白、网格移除、线条更细更亮，并统一到 `Times New Roman + 宋体` 字体栈。
+  - 重写 `scripts/analysis/export_interactive_nav_report_html.py` 的页面与表格样式，去掉偏网页化的装饰，收敛到窄版心、白底、细边框、静态 modebar 与更居中的 plot/table 容器。
+  - fresh 导出 `output/html/representative_navigation_interactive_report.html`，确保新的版式与图表交互限制进入最终单文件产物。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - 同 `EXP-20260309-interactive-report-notebook-r1`：`output/review/EXP-20260305-data4-main4-regression-r1/cfg_{baseline_eskf,gnss30_eskf}.yaml`; `config_data4_gnss30_true_iekf.yaml`; `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`; `output/review/20260306-phase2c-bg-freeze/cfg_{full,freeze_mount,freeze_bg,freeze_bg_mount}.yaml`
+- commands:
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py`
+  - `python -m py_compile scripts/analysis/export_interactive_nav_report_html.py`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+  - `rg -n "displayModeBar|scrollZoom|doubleClick|fixedrange|showgrid" output/html/representative_navigation_interactive_report.html`
+  - `rg -n "虚线表示 GNSS 关闭分界线" output/html/representative_navigation_interactive_report.html`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 单文件 HTML 大小 `8026344 bytes`。
+  - 图表样式改为白底、无网格、细线，交互限制改为保留 hover、关闭缩放/拖拽入口；HTML 注释已改为“虚线表示 GNSS 关闭分界线”。
+  - 3 组实验的底层结果口径保持不变：data4 baseline/GNSS30 ESKF RMSE3D `0.929070/51.371318`，data4 GNSS30 true_iekf `23.144284`，data2 ESKF/full/freeze_mount/freeze_bg/freeze_bg_mount `127.618348/165.591644/145.828424/98.817682/56.032658`。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-10 01:01:59`
+  - `scripts/analysis/export_interactive_nav_report_html.py`: `2026-03-10 01:03:05`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-10 01:04:07`
+- config_hash_or_mtime:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`: `2026-03-05 17:09:26`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`: `2026-03-05 17:10:45`
+  - `config_data4_gnss30_true_iekf.yaml`: `2026-03-06 11:33:39`
+  - `output/review/20260305-inekf-best4-reg-r1/cfg_gnss30_eskf.yaml`: `2026-03-05 00:32:21`
+  - `output/review/20260306-phase2c-bg-freeze/cfg_full.yaml`: `2026-03-06 18:42:24`
+- dataset_time_window:
+  - data2: `528076.009368` 到 `530488.900000`
+  - data4: `275309.007957` 到 `277300.000000`
+- result_freshness_check:
+  - pass（两份脚本与 HTML 均在本会话 fresh 编译/导出；仅修改呈现层，不改底层解算结果）
+- observability_notes:
+  - 本会话不改变任何实验结论，只继续收敛结果呈现形式。
+  - GNSS 分界提示从“阴影区域”改为“虚线分界线”，更贴合当前纯白无网格图形样式；这不影响任何调度或冻结实验的误差统计解释。
+  - 字体和样式调整仅作用于可视化层；`freeze_bg`、`freeze_mount`、GNSS 调度窗口等相关的机理判断保持不变。
+- decision:
+  - 单文件 HTML 的默认风格由“轻网页化展示”进一步收敛为“交互式 PDF”阅读风格，后续优先在这个方向上做小范围微调。
+  - 当前版本已经更适合对外阅读与打印观感：页面更白、更窄、更静，图表交互被限制为信息查看而不是图形编辑。
+- next_step:
+  - 人工在浏览器里审阅这一版字体回退效果和表格密度；如果仍需收敛，下一轮优先微调标题层级、表格列宽和 section 间距，而不是再扩大页面装饰元素。
+
+### session_id: 20260310-1654-interactive-report-drop-group3
+
+- timestamp: 2026-03-10 16:54 (local)
+- objective: 删除交互报告中与后续实验重复的第三组页面，避免内容冗余。
+- scope:
+  - 移除 `interactive_nav_report.py` 中第三组 SectionSpec 与配色定义。
+  - 重新导出 `representative_navigation_interactive_report.html`。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本次调整仅为报告结构整理，不改变任何实验结论或可观性解释。
+- decision:
+  - 第三组页面已删除，报告内容从第七/第八组获取对应机理对照信息。
+- next_step:
+  - 人工确认新 HTML 目录中已无第三组页面，且编号顺序符合预期。
+
+### session_id: 20260310-1710-interactive-report-add-analysis
+
+- timestamp: 2026-03-10 17:10 (local)
+- objective: 为每个实验页面补充“实验分析与总结”段落，解释主要现象与对比结论。
+- scope:
+  - 在 HTML 导出脚本中新增分析卡片，按实验类型生成简短分析要点。
+  - 重新导出交互报告 HTML。
+- changed_files:
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A（分析内容引用页面已有 RMSE3D / tail70 指标）
+- observability_notes:
+  - 仅补充文字分析，不改变任何实验结论或可观性解释。
+- decision:
+  - 每个实验页末尾增加“实验分析与总结”卡片，便于读者快速理解现象与对比结果。
+- next_step:
+  - 人工确认每一页分析卡片是否与曲线和指标一致，若需更细的机理解释可再扩展。
+
+### session_id: 20260310-1826-interactive-report-renumber
+
+- timestamp: 2026-03-10 18:26 (local)
+- objective: 调整实验编号与侧边栏分组，使基准对比为 2 组、问题定向为 5 组。
+- scope:
+  - 更新 Section 标题编号（第 3~7 组）并调整侧边栏分组范围。
+  - 重新导出交互报告 HTML。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`（耗时较长，进程超时，但 HTML 已写入）
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A
+- observability_notes:
+  - 仅调整报告编号与侧边栏，不改变实验结论。
+- decision:
+  - 第 1-2 组归为基准对比实验，第 3-7 组归为问题定向实验，编号与侧边栏一致。
+- next_step:
+  - 人工确认 HTML 目录编号与页面标题一致。
+
+### session_id: 20260310-1956-remove-imu-pages
+
+- timestamp: 2026-03-10 19:56 (local)
+- objective: 按要求从 HTML 交互报告移除第九/第十组 IMU 精度对照页。
+- scope:
+  - 移除 `interactive_nav_report.py` 中第九/第十组 SectionSpec 与配色定义。
+  - 移除 HTML 导出脚本中的 IMU 对照分析块，并更新侧边栏分组范围。
+  - 重新导出交互报告 HTML。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本次调整仅影响报告展示，不改变实验数据与可观性结论。
+- decision:
+  - HTML 报告当前只保留第 1-8 组实验页，IMU 精度对照页暂时隐藏。
+- next_step:
+  - 人工打开 HTML，确认侧边栏编号为 1-8，且页面内容对应更新。
+
+### session_id: 20260310-2010-report-rename-cleanup
+
+- timestamp: 2026-03-10 20:10 (local)
+- objective: 调整报告命名与方法名称显示，移除“实验分析与总结”卡片。
+- scope:
+  - 更新交互报告标题与副标题命名（实验 1/2/3/5/6）。
+  - 将显示名称统一为 InEKF，避免出现 true_iekf。
+  - 移除每组实验末尾“实验分析与总结”卡片。
+  - 重新导出 HTML 报告。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本次调整仅影响报告展示，不涉及可观性结论更新。
+- decision:
+  - HTML 报告已按要求统一命名，并移除分析卡片，页面中不再出现 true_iekf。
+- next_step:
+  - 人工打开 HTML，确认标题、方法名称与侧边栏一致。
+
+### session_id: 20260310-2015-imu-precision-report
+
+- timestamp: 2026-03-10 20:15 (local)
+- objective: 汇总 data4 三种 IMU 精度对照实验的指标，并将第九/第十组写入交互报告。
+- scope:
+  - 重新导出交互报告 HTML，确认新增 IMU 对照页。
+  - 提取第九/第十组 RMSE3D 与 tail70 指标用于实验记录。
+- changed_files:
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_{adis,ans,icm}.yaml`
+  - `output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_true_iekf_imu_{adis,ans,icm}.yaml`
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`（耗时较长，进程超时，但 HTML 已写入）
+  - `python -`（import `interactive_nav_report.py`，仅计算第九/第十组 overview 表）
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 第九组（ESKF）RMSE3D: ADIS `1277.644` m; ANS `51.374` m; ICM `1136.345` m。
+  - 第九组（ESKF）tail70 RMSE3D: ADIS `1527.076` m; ANS `61.402` m; ICM `1358.190` m。
+  - 第十组（true_iekf）RMSE3D: ADIS `180.320` m; ANS `23.144` m; ICM `1670.475` m。
+  - 第十组（true_iekf）tail70 RMSE3D: ADIS `215.523` m; ANS `27.659` m; ICM `1996.597` m。
+- observability_notes:
+  - 本实验主要验证 IMU 精度差异对 GNSS30 工况误差的影响，未引入可观性消融或冻结策略。
+- decision:
+  - ANS-200R 在 ESKF 与 true_iekf 下均显著优于 ADIS/ICM；ICM-20602 在 GNSS30 下误差最大。
+  - 交互报告新增第九/第十组 IMU 精度对照页，便于直观对比。
+- next_step:
+  - 人工确认 HTML 中第九/第十组曲线、指标表与分析卡片一致。
+
+### session_id: 20260310-2326-github-sync
+
+- timestamp: 2026-03-10 23:26 (local)
+- objective: 将当前待同步的代码、分析脚本与会话记录提交并推送到 GitHub。
+- scope:
+  - 核对 `main` 分支当前未提交变更与远端 `origin` 信息。
+  - 追加本次 GitHub 同步会话记录。
+  - 提交并推送当前待同步源码、分析脚本和 `walkthrough.md`。
+- changed_files:
+  - `apps/jacobian_audit_main.cpp`
+  - `include/app/fusion.h`
+  - `include/core/eskf.h`
+  - `plot_navresult.py`
+  - `src/app/config.cpp`
+  - `src/app/pipeline_fusion.cpp`
+  - `src/core/eskf_engine.cpp`
+  - `scripts/analysis/compute_gnss_lever_arm.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `scripts/analysis/filter_gnss_outage.py`
+  - `scripts/analysis/inekf_mechanism_report.py`
+  - `scripts/analysis/interactive_nav_report.py`
+  - `walkthrough.md`
+- configs:
+  - N/A
+- commands:
+  - `git status --short --branch`
+  - `git remote -v`
+  - `git diff --stat`
+  - `git diff --numstat`
+  - `git log --oneline -5`
+  - `git add apps/jacobian_audit_main.cpp include/app/fusion.h include/core/eskf.h plot_navresult.py src/app/config.cpp src/app/pipeline_fusion.cpp src/core/eskf_engine.cpp scripts/analysis/compute_gnss_lever_arm.py scripts/analysis/export_interactive_nav_report_html.py scripts/analysis/filter_gnss_outage.py scripts/analysis/inekf_mechanism_report.py scripts/analysis/interactive_nav_report.py walkthrough.md`
+  - `git commit -m "feat: add reset covariance audit and interactive report tooling"`
+  - `git push origin main`
+- artifacts:
+  - GitHub remote: `origin https://github.com/zhang123-1999/combined_INS.git`
+- metrics:
+  - N/A
+- observability_notes:
+  - 本会话仅做版本同步，不新增实验结论；待同步内容包含 `GNSS split/reset` 协方差审计能力与交互式报告相关脚本。
+- decision:
+  - 将当前本地待同步更新整体推送到 `origin/main`，作为后续报告审阅与机理分析的远端基线。
+- next_step:
+  - 在远端确认提交可见后，继续执行 HTML 报告人工核对和 `bg_z`/杆臂相关后续分析。
+
+### session_id: 20260311-0019-report-attitude-error-fix
+
+- timestamp: 2026-03-11 00:19 (local)
+- objective: Check whether the non-zero-mean pitch in the attitude-error plot indicates a solver bug, and fix the confirmed report-side error definition issue.
+- scope:
+  - Audit the output semantics of `fused_roll/pitch/yaw` and `mounting_pitch/yaw` and confirm that fused attitude and mounting are recorded separately.
+  - Verify that `interactive_nav_report.py` originally computed `pitch/roll` error by direct Euler subtraction.
+  - Switch body `pitch/roll` and vehicle heading error to relative-rotation decomposition and re-export the HTML report.
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `config_data2_baseline_eskf.yaml`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/cfg_data2_eskf_gnss_outage_cycle.yaml`
+- commands:
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py scripts/analysis/export_interactive_nav_report_html.py`
+  - `python -` (temporary local checks with `build_representative_report(1200)` before and after the fix)
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - Pre-fix (direct Euler subtraction): data4 baseline ESKF `pitch_mean=-0.109177` deg; data4 GNSS30 ESKF `-0.109860` deg; data2 baseline ESKF `0.011439` deg; data2 outage `0.008815` deg.
+  - Relative-rotation audit on data4 baseline ESKF: direct-vs-relative pitch mean `-0.110987 -> 0.017451` deg; mean absolute channel difference `0.149035` deg.
+  - Post-fix (relative rotation): data4 baseline ESKF `pitch_mean=0.016138` deg; data4 GNSS30 ESKF `0.012898` deg; data2 baseline ESKF `-0.003122` deg; data2 outage `-0.003248` deg.
+- observability_notes:
+  - Report-only math fix; no changes to filter state, measurement Jacobians, sensor schedules, or any `21-30` state-block observability conclusion.
+  - No changes to `fusion.gnss_schedule.*`, `fusion.post_gnss_ablation.*`, or any freeze/ablation controls.
+- decision:
+  - The old report-side `pitch/roll` non-zero mean is not by itself evidence that the solver is wrong; the main issue was the direct Euler-subtraction error definition.
+  - Use relative-rotation decomposition for attitude-error plots going forward; only treat remaining bias under that definition as a solver candidate.
+- next_step:
+  - Open the regenerated HTML report and confirm that the body-attitude error page and the statistics table match; then audit notebook/other analysis scripts for the same direct-Euler-subtraction pattern.
+
+### session_id: 20260311-0044-html-attitude-cn-audit
+
+- timestamp: 2026-03-11 00:44 (local)
+- objective: 将 HTML 报告中姿态误差分组的英文标题改为中文，并系统确认报告链路不存在第二份旧版姿态/航向误差定义。
+- scope:
+  - 将 `interactive_nav_report.py` 中姿态误差分组标题与 `pitch/roll` 子图标签统一改为中文。
+  - 重新导出 `output/html/representative_navigation_interactive_report.html`。
+  - 审计 `interactive_nav_report.py`、`inekf_mechanism_report.py` 与 notebook 引用关系，确认误差定义只在单一源头实现。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `scripts/analysis/interactive_nav_report.py` 内 `REPORT_SECTIONS` 所列 8 组 case 配置路径
+- commands:
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py scripts/analysis/export_interactive_nav_report_html.py`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+  - `python -`（调用 `build_representative_report(target_points=1200)` 抽查 `vehicle_heading/level_angles` 统计表）
+  - `python -`（审计 notebook 是否直接复用 `interactive_nav_report.py`）
+  - `rg -n "体系姿态角误差|俯仰角误差|横滚角误差|attitude error \\(body frame\\)|Pitch 误差|Roll 误差" output/html/representative_navigation_interactive_report.html`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `output/jupyter-notebook/representative_navigation_interactive_report.ipynb`
+- metrics:
+  - HTML 检索：`体系姿态角误差/俯仰角误差/横滚角误差` 均命中；`attitude error (body frame)/Pitch 误差/Roll 误差` 为 `0` 命中。
+  - 源码审计：仅 `scripts/analysis/interactive_nav_report.py` 计算 `vehicle_heading_err_deg/pitch_err_deg/roll_err_deg`；`scripts/analysis/inekf_mechanism_report.py` 只消费 `vehicle_heading_err_deg`；notebook 通过 import 直接复用 `interactive_nav_report.py`。
+  - 重新导出后的代表性统计：data4 baseline ESKF `pitch_mean=0.017451 deg`, `roll_mean=-0.007820 deg`；data4 GNSS30 ESKF `pitch_mean=0.014135 deg`；data2 baseline ESKF `pitch_mean=-0.001551 deg`。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-11 00:42:24`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-11 00:44:00`
+- config_hash_or_mtime:
+  - 本会话未改动各实验配置文件；复用 `REPORT_SECTIONS` 中既有配置路径。
+- dataset_time_window:
+  - 复用 `REPORT_SECTIONS` 现有 8 组 case 对应 truth/solution 全时段，不新增 solver 运行。
+- result_freshness_check:
+  - pass（脚本编译通过，HTML 在本会话 fresh 导出，文案与统计值在导出后复查一致）
+- observability_notes:
+  - 仅报告文案与链路审计；不改动 `fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*` 或状态块 `21-30` 的任何可观性结论。
+- decision:
+  - 最终提交版 HTML 中，姿态误差分组标题和通道标签已统一为中文。
+  - 报告链路未发现第二份残留的直接欧拉角相减实现；当前 HTML、notebook 与机理分析共用同一误差定义源头。
+- next_step:
+  - 人工打开最终 HTML，重点确认“体系姿态角误差”页的中文标题、曲线 hover 标签与统计表呈现一致；随后继续整理机理总结章节。
+
+### session_id: 20260311-0104-html-accuracy-audit
+
+- timestamp: 2026-03-11 01:04 (local)
+- objective: 系统检查最终 HTML 报告是否还存在其他影响交付准确性的问题，并在必要时直接修正。
+- scope:
+  - 顺序重导出 `output/html/representative_navigation_interactive_report.html`，避免并行审计读到旧文件。
+  - 对最终 HTML 做可见文本审计、表格级校验与误差定义合成测试。
+  - 修正 `n` 系 `v_d` 通道中文标题把 Down 分量误写成“天向”的问题。
+- changed_files:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `scripts/analysis/interactive_nav_report.py` 内 `REPORT_SECTIONS` 所列 8 组 case 配置路径
+- commands:
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+  - `python -m py_compile scripts/analysis/interactive_nav_report.py scripts/analysis/export_interactive_nav_report_html.py`
+  - `python -`（BeautifulSoup 可见文本审计：统计英文残留、占位值、raw case id）
+  - `python -`（`pandas.read_html` 解析最终 HTML 表格并抽查第 1 组速度/姿态误差表）
+  - `python -`（对 `relative_euler_error_deg` 做合成扰动验证）
+  - `rg -n "天向速度误差|地向速度误差|Interactive Report|Experiment 01|GNSS cutoff|NaN|None|freeze_bg|baseline" output/html/representative_navigation_interactive_report.html`
+- artifacts:
+  - `scripts/analysis/interactive_nav_report.py`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 可见文本审计：`Interactive Report/Experiment 01/GNSS cutoff/NaN/None/case/signal/freeze_bg/baseline` 在最终 HTML 可见文本中的命中均为 `0`。
+  - 表格级核验：HTML 共解析出 `48` 张表；第 1 组速度误差表中第三通道已显示为 `地向速度误差 v_d [m/s]`。
+  - 姿态误差现值保持稳定：data4 baseline ESKF `pitch_mean=0.017451 deg`, `roll_mean=-0.007820 deg`；data4 GNSS30 ESKF `pitch_mean=0.014135 deg`, `roll_mean=-0.005615 deg`。
+  - 合成验证：`relative_euler_error_deg` 对任意参考姿态下左乘 `(1,0,0)/(0,1,0)/(0,0,1)` deg 扰动均精确回显对应 roll/pitch/yaw 误差，未发现新的角误差定义异常。
+- artifact_mtime:
+  - `scripts/analysis/interactive_nav_report.py`: `2026-03-11 01:02:16`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-11 01:03:40`
+- config_hash_or_mtime:
+  - 本会话未改动各实验配置文件；继续复用 `REPORT_SECTIONS` 中既有配置路径。
+- dataset_time_window:
+  - 复用 `REPORT_SECTIONS` 对应 truth/solution 全时段，不新增 solver 运行。
+- result_freshness_check:
+  - pass（HTML 在本会话 fresh 导出；脚本 `py_compile` 通过；可见文本、表格与误差定义合成测试均在导出后顺序完成）
+- observability_notes:
+  - 本会话仅做报告层准确性审计，不改变 `fusion.ablation.*`、`fusion.post_gnss_ablation.*`、`fusion.gnss_schedule.*` 或状态块 `21-30` 的任何可观性结论。
+- decision:
+  - 本轮未发现第二个会影响 HTML 交付准确性的可见问题；此前“水平角/姿态误差定义”修复后的统计值在最终成品中保持一致。
+  - `n` 系 `v_d` 通道中文标签已修正为 `地向速度误差`，当前 HTML 可作为提交版本。
+- next_step:
+  - 若 notebook 也需要单独交付，重新执行其输出单元，确保渲染结果同步继承当前 `地向速度误差` 标签；否则仅做浏览器人工 spot-check 后即可提交。
+
+
+### theme_06_superseded_data4_r1_and_outage_chain | 被 supersede 的 data4 r1 与 outage 误接链
+
+#### session_ids_covered
+
+- `20260305-2222-inekf-eskf-data2-data4-pipeline`
+- `20260306-1714-data4-vs-data2-gnss30-gap-analysis`
+- `20260310-gnss-lever-vel-experiments-html-sidebar`
+- `20260310-1854-data2-gnss-outage-cycle`
+- `20260312-1410-data2-gnss-outage-cycle-inekf-best-and-html`
+- `20260312-1414-outage-cycle-inekf-best-handoff-check`
+- `20260312-1429-outage-cycle-inekf-best-reference-correction`
+- `20260312-1443-outage-cycle-true-tuned-replacement`
+- `20260312-2150-representative-data4-conflict-check`
+
+#### complete_raw_blocks
+
+### session_id: 20260310-gnss-lever-vel-experiments-html-sidebar
+
+- timestamp: 2026-03-10 (续前次会话)
+- objective: ①验证 data4 全程 GNSS 下高程误差来源假设（GNSS 杆臂偏差）；②研究 GNSS 速度有无对解算的影响（true_iekf）；③将 HTML 交互报告扩展为左侧固定侧边栏分页布局，新增第4-6组实验。
+- scope:
+  - 计算 GNSS 天线相对 IMU 的体系杆臂（`scripts/analysis/compute_gnss_lever_arm.py`）。
+  - 创建 6 个实验 config（杆臂×4 + 速度×2），修复 P0_diag 维度（31项）。
+  - 编译并运行全部 6 组实验，记录 RMSE。
+  - 修改 `interactive_nav_report.py`：新增 group4/5/6 颜色 + 3 个 SectionSpec。
+  - 重构 `export_interactive_nav_report_html.py`：左侧 240px 固定侧边栏 + 右侧分页内容，JS 控制显示/隐藏。
+  - 重新生成 HTML 报告。
+- changed_files:
+  - `scripts/analysis/compute_gnss_lever_arm.py` (新建)
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_free.yaml` (新建)
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_fixed.yaml` (新建)
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_free.yaml` (新建)
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_fixed.yaml` (新建)
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/cfg_with_vel.yaml` (新建)
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/cfg_no_vel.yaml` (新建)
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_free.yaml`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_fixed.yaml`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_free.yaml`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_fixed.yaml`
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/cfg_with_vel.yaml`
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/cfg_no_vel.yaml`
+- commands:
+  - `cmake --build build --config Release --target eskf_fusion`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_free.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-lever-fix-r1/cfg_eskf_fixed.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_free.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-lever-fix-r1/cfg_true_iekf_fixed.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-vel-effect-r1/cfg_with_vel.yaml`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-gnss-vel-effect-r1/cfg_no_vel.yaml`
+  - `python scripts/analysis/export_interactive_nav_report_html.py`
+- artifacts:
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/SOL_data4_lever_eskf_free.txt`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/SOL_data4_lever_eskf_fixed.txt`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/SOL_data4_lever_true_iekf_free.txt`
+  - `output/review/EXP-20260310-gnss-lever-fix-r1/SOL_data4_lever_true_iekf_fixed.txt`
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/SOL_data4_vel_with.txt`
+  - `output/review/EXP-20260310-gnss-vel-effect-r1/SOL_data4_vel_no.txt`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `scripts/analysis/compute_gnss_lever_arm.py`
+- metrics:
+  - 计算得杆臂（体系）: `[1.3028, 0.2932, -1.0797]` m，标准差 `[0.0046, 0.0059, 0.0119]` m（1839样本）
+  - ESKF 自由杆臂 RMSE xyz: `0.567121 0.503075 0.537088` m
+  - ESKF 固定杆臂 RMSE xyz: `0.038719 0.018372 0.017577` m（精度提升约15-30倍）
+  - true_iekf 自由杆臂 RMSE xyz: `0.569762 0.504036 0.536038` m
+  - true_iekf 固定杆臂 RMSE xyz: `0.015617 0.013005 0.016479` m（精度提升约35倍）
+  - true_iekf 含速度 RMSE xyz: `0.569762 0.504036 0.536038` m
+  - true_iekf 无速度 RMSE xyz: `0.580967 0.534876 0.535481` m（速度影响极小）
+- artifact_mtime:
+  - SOL 文件在本会话 fresh 生成（2026-03-10）
+  - HTML 在本会话 fresh 生成
+- config_hash_or_mtime:
+  - 本会话新建 6 个 config 文件（2026-03-10）
+- dataset_time_window:
+  - data4: `275309.0` 到 `277300.0`（全程GNSS，无schedule截断）
+- result_freshness_check:
+  - pass（SOL 文件与 HTML 均在本会话 fresh 生成）
+- observability_notes:
+  - 实验一（GNSS杆臂）直接映射状态块 `gnss_lever_arm` (indices 28-30)：自由估计时误差 ~0.5m，固定真值后误差降至 ~0.02m，证实 **高程误差主因是 GNSS 杆臂未正确初始化**。
+  - 实验二（GNSS速度）：在全程GNSS + ODO + NHC 组合下，含/不含 GNSS 速度的 RMSE 差异 < 0.04m，说明全程GNSS场景下速度约束边际贡献极小，ODO/NHC 已足够约束速度。
+  - 杆臂固定实验使用 `fusion.ablation.disable_gnss_lever_arm: true`（全程生效，区别于 `post_gnss_ablation`）。
+  - ESKF 和 true_iekf 在固定杆臂后均大幅改善，说明问题来自观测模型（杆臂补偿），而非滤波框架本身。
+- decision:
+  - **高程误差主因已确认**：GNSS天线相对IMU的杆臂（约 `[1.3, 0.3, -1.1]` m）若不正确给定，直接在每次GNSS更新中引入约1m量级的系统性偏差。
+  - GNSS速度的边际贡献在全程GNSS场景下可以忽略；在稀疏GNSS（GNSS30）场景中的贡献仍需参考旧结论（HYP-8）。
+  - HTML报告已扩展为6页侧边栏格式，第4-6页展示新实验。
+- next_step:
+  - 人工打开 `output/html/representative_navigation_interactive_report.html`，检查侧边栏导航与第4-6页的渲染效果。
+  - 考虑在 `config_data4_baseline_eskf.yaml` 等主配置中将 `gnss_lever_arm0` 更新为计算值，以避免后续实验继续受杆臂偏差影响。
+
+### session_id: 20260310-1854-data2-gnss-outage-cycle
+
+- timestamp: 2026-03-10 18:54 (local)
+- objective: 新增 data2 ESKF 多次 GNSS outage 基础对准实验，并加入交互报告基准组。
+- scope:
+  - 生成周期性 GNSS outage 文件（900s on + 300/120 周期）。
+  - 新建配置并运行 ESKF 解算。
+  - 交互报告新增第三组基础对准实验并重排编号。
+- changed_files:
+  - `scripts/analysis/filter_gnss_outage.py`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/cfg_data2_eskf_gnss_outage_cycle.yaml`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/SOL_data2_eskf_gnss_outage_cycle.txt`
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`（派生）
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/cfg_data2_eskf_gnss_outage_cycle.yaml`
+- commands:
+  - `python scripts/analysis/filter_gnss_outage.py`
+  - `build/Release/eskf_fusion.exe --config output/review/EXP-20260310-data2-gnss-outage-cycle-r1/cfg_data2_eskf_gnss_outage_cycle.yaml`
+  - `python scripts/analysis/export_interactive_nav_report_html.py --target-points 1200`
+- artifacts:
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/SOL_data2_eskf_gnss_outage_cycle.txt`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - GNSS rows kept: `2053/2413 (0.851)`.
+  - ESKF RMSE xyz: `2.406998 2.579152 3.979878` m.
+- observability_notes:
+  - 本实验通过周期性 GNSS 失锁测试基础对准稳定性，不涉及额外可观性消融。
+- decision:
+  - 新增第三组基础对准实验，基准对比实验页数增至 3，问题定向实验页数为 5。
+- next_step:
+  - 人工打开 HTML，确认第三组曲线与分析卡片渲染正常。
+
+### session_id: 20260312-1410-data2-gnss-outage-cycle-inekf-best-and-html
+
+- timestamp: 2026-03-12 14:10 (local)
+- objective: 复用旧的 data2 GNSS 周期开断实验口径，在 `data2_gnss30_inekf_best` 最优开关上做同样的周期断续 GNSS 实验，并将结果写入 HTML 报告作为第十一组。
+- scope:
+  - 新建 `EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1` 目录，派生 fresh 控制组与实验组配置。
+  - 控制组使用 full-GNSS `data2_baseline_eskf`；实验组使用 `data2_gnss30_inekf_best` 的 InEKF 最优开关，关闭 `gnss_schedule`，改用同一份 `GNSS_outage_cycle.txt`。
+  - fresh 跑两组解算，生成 `metrics.csv / summary.md`，并把该实验接入 HTML 报告作为第十一组。
+- changed_files:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_baseline_eskf_fresh.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_inekf_best_gnss_outage_cycle.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_baseline_eskf_fresh.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_inekf_best_gnss_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/metrics.csv`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_baseline_eskf_fresh.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_inekf_best_gnss_outage_cycle.yaml`
+- commands:
+  - `Get-Content walkthrough.md -TotalCount 260`
+  - `Get-Content output\review\EXP-20260310-data2-gnss-outage-cycle-r1\cfg_data2_eskf_gnss_outage_cycle.yaml`
+  - `Get-Content config_data2_gnss30_inekf_best.yaml`
+  - `build\Release\eskf_fusion.exe --config output\review\EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1\cfg_data2_baseline_eskf_fresh.yaml`
+  - `build\Release\eskf_fusion.exe --config output\review\EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1\cfg_data2_inekf_best_gnss_outage_cycle.yaml`
+  - `python -`（基于 `interactive_nav_report.py` 生成 `metrics.csv` 与 `summary.md`）
+  - `python -m py_compile scripts\analysis\interactive_nav_report.py scripts\analysis\export_interactive_nav_report_html.py`
+  - `python scripts\analysis\export_interactive_nav_report_html.py --target-points 1200`
+  - `python -`（核对 HTML `nav_items/pages=11/11` 与新 case id 已写入）
+- artifacts:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_baseline_eskf_fresh.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_inekf_best_gnss_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/metrics.csv`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - full-GNSS control `data2_baseline_eskf_fresh`: RMSE3D=`1.492452` m，P95=`2.030871` m，tail70=`1.407619` m，final3D=`1.253928` m。
+  - outage experiment `data2_inekf_best_gnss_outage_cycle`: RMSE3D=`17.893124` m，P95=`36.719001` m，tail70=`21.317561` m，final3D=`2.785417` m。
+  - delta (outage InEKF-best - full-GNSS ESKF): RMSE3D `+16.400672` m，final3D `+1.531489` m。
+  - HTML 交互报告由 `10` 页扩展为 `11` 页。
+- artifact_mtime:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_baseline_eskf_fresh.txt`: `2026-03-12 14:04:39`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/SOL_data2_inekf_best_gnss_outage_cycle.txt`: `2026-03-12 14:04:35`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/metrics.csv`: `2026-03-12 14:06:30`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`: `2026-03-12 14:06:30`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-12 14:10:03`
+- config_hash_or_mtime:
+  - 本会话未改 solver 核心；仅派生实验配置、复用既有 `GNSS_outage_cycle.txt` 并更新 HTML 报告脚本。
+  - `cfg_data2_inekf_best_gnss_outage_cycle.yaml` 相对原始 `config_data2_gnss30_inekf_best.yaml` 的关键变更是：`gnss_path` 改到周期断续文件，`gnss_schedule.enabled=false`。
+- dataset_time_window:
+  - data2 IMU/Truth window: `528076.009368 -> 530488.900000`
+  - GNSS 调度采用外部文件 `GNSS_outage_cycle.txt`，口径为 `900s` 收敛后 `300s on / 120s off` 周期断续
+- result_freshness_check:
+  - pass（两组 `SOL_*.txt`、本实验 `metrics.csv/summary.md` 和 HTML 报告都在本会话 fresh 生成或重导出）
+- observability_notes:
+  - 本会话未冻结 `21-30` 状态块，也未启用新的 `fusion.ablation.*` / `fusion.post_gnss_ablation.*`；状态块全部自由估计。
+  - 调度改动发生在 GNSS 通道：从 `head_ratio` 单次截断切换为外部周期断续文件；`ODO/NHC` 全程保持开启。
+  - 行为上，`data2_gnss30_inekf_best` 在该周期断续口径下相对 full-GNSS ESKF 明显 degraded，尤其 tail70 RMSE3D 从 `1.407619` m 升到 `21.317561` m。
+- decision:
+  - 当前已经按用户指定口径完成了“full-GNSS ESKF 控制组 vs InEKF 最优开关 + GNSS 周期开断实验组”的 fresh 对照，并接入 HTML 报告成品。
+  - 由于控制组与实验组同时改变了 GNSS 调度和滤波结构，这一组结果更适合作为“当前 InEKF 最优配置在周期断续 GNSS 下的实际表现”展示，而不是纯粹的 ESKF/InEKF 算法优劣结论。
+- next_step:
+  - 若需要更纯粹的算法对照，下一步应补一个“同一份 `GNSS_outage_cycle.txt` 下的 `data2 ESKF` vs `data2 InEKF-best`”直接 A/B。
+  - 若保持当前展示口径，则可继续把 `r2` 机制结论同步进 `.tex`，并决定是否在 HTML 中把 runtime 建议明确写成 `data2`-specific。
+
+### session_id: 20260312-1414-outage-cycle-inekf-best-handoff-check
+
+- timestamp: 2026-03-12 14:14 (local)
+- objective: 对已完成的 `EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1` 与 HTML 成品做交接核验，并基于 fresh 产物向用户汇报当前实验状态。
+- scope:
+  - 读取 `walkthrough.md`，确认当前 phase、最近完成会话、开放假设与 Next Actions。
+  - 核对实验 `summary.md` 中的关键指标。
+  - 核对 HTML 成品仍包含新实验对应的 case id，且文件时间戳与大小正常。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_baseline_eskf_fresh.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_inekf_best_gnss_outage_cycle.yaml`
+- commands:
+  - `Get-Content C:\Users\不存在的骑士\.codex\skills\using-superpowers\SKILL.md`
+  - `Get-Content walkthrough.md`
+  - `Get-Content output\review\EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1\summary.md`
+  - `Select-String -Path output\html\representative_navigation_interactive_report.html -Pattern 'data2_baseline_eskf_fresh|data2_inekf_best_gnss_outage_cycle'`
+  - `Get-Item output\html\representative_navigation_interactive_report.html | Select-Object LastWriteTime,Length`
+- artifacts:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - 复核结果与上一会话一致：`data2_baseline_eskf_fresh` RMSE3D=`1.492452` m，`data2_inekf_best_gnss_outage_cycle` RMSE3D=`17.893124` m。
+  - `delta RMSE3D = +16.400672` m，`delta final3D = +1.531489` m。
+- artifact_mtime:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`: existing fresh artifact from prior session
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-12 14:10:03`
+- config_hash_or_mtime:
+  - 本会话未改任何求解配置与分析脚本，仅做读取核验并记录交接状态。
+- dataset_time_window:
+  - 复用上一会话口径：data2 IMU/Truth `528076.009368 -> 530488.900000`；GNSS 周期开断为 `900s` 收敛后 `300s on / 120s off`。
+- result_freshness_check:
+  - pass（核对到的 `summary.md` 与 HTML 均对应 2026-03-12 的 fresh 产物；HTML 内部可检索到新实验 case id）
+- observability_notes:
+  - 本会话未新增可观性实验，仅确认“GNSS 周期开断 + InEKF 最优配置”这一展示项已经稳定写入报告。
+  - 因控制组与实验组不共享同一 GNSS 调度，本条记录不新增算法机制结论。
+- decision:
+  - 当前任务可直接对外汇报为“实验已完成，结果已写入 HTML 报告，第十一组可用”。
+  - 进一步的机制解释仍应回到 `r2` 结论整合，或补做同 schedule 的 ESKF/InEKF 直接 A/B。
+- next_step:
+  - 若继续当前主线，优先执行同一份 `GNSS_outage_cycle.txt` 下的 `data2 ESKF` vs `data2 InEKF-best` 直接对照。
+  - 若先收口文档，则把 `r2` 的机制结论同步进 `.tex` 与 HTML 说明文字。
+
+### session_id: 20260312-1429-outage-cycle-inekf-best-reference-correction
+
+- timestamp: 2026-03-12 14:29 (local)
+- objective: 纠正“周期开断 InEKF 与 GNSS30 InEKF 最优组”的对照口径，确认当前第十一组实验实际复用的是旧 `inekf_best` 配置，而不是 NHC 扫频后得到的 `true_iekf tuned` 最优组。
+- scope:
+  - 复核 `EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1` 使用的派生配置。
+  - 对照 `EXP-20260311-odo-nhc-rate-sweep-r3/r3b` 与 `EXP-20260312-inekf-mechanism-attribution-r2`，确认 `data2 GNSS30 true_iekf tuned` 的正式最优口径与关键指标。
+  - 收紧结论：区分“旧 `inekf_best` 原始 NHC 口径”与“当前 true_iekf + NHC 0.75Hz 最优口径”。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/cfg_data2_inekf_best_gnss_outage_cycle.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_true_tuned.yaml`
+  - `config_data2_gnss30_inekf_best.yaml`
+  - `config_data2_gnss30_true_iekf.yaml`
+- commands:
+  - `Get-Content walkthrough.md | Select-Object -Last 120`
+  - `Select-String walkthrough.md -Pattern '21.656987|0.75Hz|EXP-20260311-odo-nhc-rate-sweep|EXP-20260312-inekf-mechanism-attribution-r2' -Context 2,2`
+  - `Get-Content output\review\EXP-20260312-inekf-mechanism-attribution-r2\summary.md`
+  - `Select-String output\review\EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1\cfg_data2_inekf_best_gnss_outage_cycle.yaml -Pattern 'ri_*|nhc_min_update_interval|odo_min_update_interval'`
+  - `Select-String output\review\EXP-20260312-inekf-mechanism-attribution-r2\cases\data2\cfg_data2_true_tuned.yaml -Pattern 'ri_*|nhc_min_update_interval|odo_min_update_interval'`
+  - `python -`（用 `interactive_nav_report.py` 统一计算 `eskf_cycle / inekf_cycle / true_tuned_gnss30` 的 RMSE3D、tail70 与 vehicle-heading 统计）
+- artifacts:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1/summary.md`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/summary.md`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_true_tuned.yaml`
+- metrics:
+  - `inekf_cycle`（当前第十一组）: RMSE3D=`17.893124` m，P95=`36.719001` m，tail70=`21.317561` m，final3D=`2.785417` m。
+  - `true_tuned_gnss30`（当前正式最优 GNSS30 InEKF 口径）: RMSE3D=`21.656987` m，P95=`52.295784` m，tail70=`25.866246` m，final3D=`58.009538` m。
+  - `eskf_cycle`: RMSE3D=`5.318373` m，P95=`7.036072` m，tail70=`6.299374` m，final3D=`1.207402` m。
+  - vehicle-heading 对比：
+    `inekf_cycle` q95/q99/final=`8.922/16.794/-19.410` deg；
+    `true_tuned_gnss30`=`2.596/2.659/-0.145` deg；
+    `eskf_cycle`=`2.454/3.015/2.323` deg。
+- artifact_mtime:
+  - 本会话仅复核既有产物，未生成新实验文件。
+- config_hash_or_mtime:
+  - 关键差异已确认：
+    `cfg_data2_inekf_best_gnss_outage_cycle.yaml` 使用 `nhc_min_update_interval=0.0`；
+    `cfg_data2_true_tuned.yaml` 使用 `nhc_min_update_interval=1.3333333333333333`（`0.75Hz`）。
+  - 两者都保留 `ri_gnss_pos_use_p_ned_local=true`, `ri_vel_gyro_noise_mode=1`, `ri_inject_pos_inverse=true`。
+- dataset_time_window:
+  - data2 IMU/Truth `528076.009368 -> 530488.900000`
+  - 周期开断 GNSS 文件有效行数比 full GNSS 为 `2053/2413 = 0.850808`，显著高于 `GNSS30` 的 `0.30` 时间占比。
+- result_freshness_check:
+  - pass（本会话使用的第十一组、`r2` 机制汇总与 NHC 扫频指标均来自 2026-03-11 / 2026-03-12 的已登记 fresh 产物）
+- observability_notes:
+  - 当前第十一组并不是“当前最优 tuned true_iekf”在周期开断下的表现，而是“旧 `inekf_best` + raw NHC”在周期开断下的表现。
+  - 因此，不能再用第十一组去直接论证“当前最优 InEKF 在周期开断下反而不如 GNSS30 tuned”；这个结论口径不成立。
+  - 真正仍然成立的异常是：在周期断续口径下，当前第十一组相对 `eskf_cycle` 明显 degraded，且劣化主要集中在 `v系航向误差 / vv_y / 高程` 等后段误差通道。
+- decision:
+  - 用户指出的问题成立：此前把 `88.890428` 当作“当前最优 GNSS30 InEKF”是错误对照。
+  - 当前第十一组实验应重新标注为“旧 `inekf_best` 周期开断结果”，而不是“tuned true_iekf 周期开断结果”。
+  - 下一轮若要回答“当前最优 InEKF 在周期开断下到底怎样”，必须以 `cfg_data2_true_tuned.yaml` 为基线重跑同一份 `GNSS_outage_cycle.txt`。
+- next_step:
+  - 最高优先级：派生 `cfg_data2_true_tuned_gnss_outage_cycle.yaml`，仅把 `gnss_path` 切到同一份 `GNSS_outage_cycle.txt`，然后 fresh 跑 corrected 周期开断实验。
+  - corrected 结果出来后，再决定第十一组 HTML 是否需要替换为 tuned true_iekf 版本，或保留旧版并改名说明。
+
+### session_id: 20260312-1443-outage-cycle-true-tuned-replacement
+
+- timestamp: 2026-03-12 14:43 (local)
+- objective: 使用真正的 `data2 true_iekf tuned` 最优配置（`ODO raw + NHC 0.75Hz`）重跑 `GNSS_outage_cycle` 实验，并替换掉原第十一组中误接的旧 `inekf_best + raw NHC` 结果。
+- scope:
+  - 从 `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_true_tuned.yaml` 派生 corrected 周期开断配置。
+  - 新建 `EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1`，复制同一份 `GNSS_outage_cycle.txt`，fresh 跑控制组与 corrected 实验组。
+  - 生成 `metrics.csv / summary.md`，并把 HTML 报告第十一组切换到 corrected 产物。
+  - 在实验索引中明确把旧 `EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1` 与 `EXP-20260312-interactive-report-html-r6` 标记为 superseded。
+- changed_files:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_baseline_eskf_fresh.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_true_tuned_gnss_outage_cycle.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_baseline_eskf_fresh.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_true_tuned_gnss_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_true_tuned_gnss_outage_cycle_mechanism.csv`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/data2_true_tuned_gnss_outage_cycle.stdout.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/metrics.csv`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/summary.md`
+  - `scripts/analysis/interactive_nav_report.py`
+  - `scripts/analysis/export_interactive_nav_report_html.py`
+  - `output/html/representative_navigation_interactive_report.html`
+  - `walkthrough.md`
+- configs:
+  - `config_data2_baseline_eskf.yaml`
+  - `output/review/EXP-20260312-inekf-mechanism-attribution-r2/cases/data2/cfg_data2_true_tuned.yaml`
+  - `output/review/EXP-20260310-data2-gnss-outage-cycle-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_baseline_eskf_fresh.yaml`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_true_tuned_gnss_outage_cycle.yaml`
+- commands:
+  - `Get-Content walkthrough.md | Select-Object -Last 180`
+  - `Get-Content scripts\analysis\interactive_nav_report.py | Select-Object -Index (140..260)`
+  - `Get-Content scripts\analysis\export_interactive_nav_report_html.py | Select-Object -Index (1..260)`
+  - `Get-Content output\review\EXP-20260312-inekf-mechanism-attribution-r2\cases\data2\cfg_data2_true_tuned.yaml`
+  - `python -`（生成 corrected 配置、复制 `GNSS_outage_cycle.txt`）
+  - `build\Release\eskf_fusion.exe --config output\review\EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1\cfg_data2_baseline_eskf_fresh.yaml`
+  - `build\Release\eskf_fusion.exe --config output\review\EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1\cfg_data2_true_tuned_gnss_outage_cycle.yaml *> output\review\EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1\data2_true_tuned_gnss_outage_cycle.stdout.txt`
+  - `python -`（基于 `interactive_nav_report.py` 生成 corrected `metrics.csv` 与 `summary.md`）
+  - `python -m py_compile scripts\analysis\interactive_nav_report.py scripts\analysis\export_interactive_nav_report_html.py`
+  - `python scripts\analysis\export_interactive_nav_report_html.py --target-points 1200`
+  - `Select-String output\html\representative_navigation_interactive_report.html -Pattern 'data2_true_tuned_gnss_outage_cycle|EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1|第十一组：GNSS周期开断（data2 true_iekf最优）'`
+  - `Select-String output\html\representative_navigation_interactive_report.html -Pattern 'data2_inekf_best_gnss_outage_cycle|EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1' | Measure-Object`
+- artifacts:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/GNSS_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_baseline_eskf_fresh.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_true_tuned_gnss_outage_cycle.txt`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/metrics.csv`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/summary.md`
+  - `output/html/representative_navigation_interactive_report.html`
+- metrics:
+  - full-GNSS control `data2_baseline_eskf_fresh`: RMSE3D=`1.492452` m，P95=`2.030871` m，tail70=`1.407619` m，final3D=`1.253928` m。
+  - corrected outage experiment `data2_true_tuned_gnss_outage_cycle`: RMSE3D=`1.186893` m，P95=`2.062296` m，tail70=`1.020212` m，final3D=`0.556853` m。
+  - delta (outage true_tuned - full-GNSS ESKF): RMSE3D `-0.305559` m，tail70 `-0.387406` m，final3D `-0.697075` m。
+  - 相比被 supersede 的旧错误组 `17.893124` m，corrected 组下降约 `-16.706231` m。
+- artifact_mtime:
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_baseline_eskf_fresh.txt`: `2026-03-12 14:36:37`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_true_tuned_gnss_outage_cycle.txt`: `2026-03-12 14:37:32`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/metrics.csv`: `2026-03-12 14:38:36`
+  - `output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/summary.md`: `2026-03-12 14:38:36`
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-12 14:42:33`
+- config_hash_or_mtime:
+  - `cfg_data2_true_tuned_gnss_outage_cycle.yaml` 仅相对 `cfg_data2_true_tuned.yaml` 做了 3 处核心修改：
+    `gnss_path -> GNSS_outage_cycle.txt`，
+    `output_path -> SOL_data2_true_tuned_gnss_outage_cycle.txt`，
+    `gnss_schedule.enabled -> false`。
+  - 关键 tuned 口径保持不变：`true_iekf_mode=true`，`ri_gnss_pos_use_p_ned_local=true`，`ri_vel_gyro_noise_mode=1`，`ri_inject_pos_inverse=true`，`nhc_min_update_interval=1.3333333333333333`。
+  - `interactive_nav_report.py` 与 `export_interactive_nav_report_html.py` 在本会话中更新为第十一组读取 corrected `true_tuned` 产物。
+- dataset_time_window:
+  - data2 IMU/Truth window: `528076.009368 -> 530488.900000`
+  - GNSS 调度采用外部文件 `GNSS_outage_cycle.txt`，口径为 `900s` 收敛后 `300s on / 120s off` 周期断续。
+- result_freshness_check:
+  - pass（control/outage 两组 `SOL_*.txt`、corrected `metrics.csv/summary.md` 以及 HTML 成品均在本会话 fresh 生成或重导出）
+- observability_notes:
+  - 本会话未冻结 `21-30` 状态块，也未新增 `fusion.ablation.*` / `fusion.post_gnss_ablation.*`；状态块全部自由估计。
+  - 调度变化仅发生在 GNSS 通道：从 `head_ratio=0.30` 单次截断切换为外部周期断续文件；`ODO` 继续 raw，`NHC` 保持 tuned `0.75Hz`，因此 corrected 组真正对应“当前最优 true_iekf 配置”。
+  - corrected 结果显示，在 tuned `true_iekf` 下，周期断续 GNSS 不仅没有像旧 raw-NHC 组那样显著 degraded，反而相对 full-GNSS ESKF 控制组仍表现为 improved。
+- decision:
+  - 旧第十一组关于“周期断续 InEKF 明显更差”的展示已被正式更正；问题根因是误用了旧 `inekf_best + raw NHC` 口径，而不是 tuned `true_iekf` 本身。
+  - 当前 HTML 第十一组已经替换为 corrected `true_tuned` 结果，旧 case id 与旧 exp_id 均不再出现在新导出的成品中。
+  - 目前同一份 `GNSS_outage_cycle.txt` 下，`data2 ESKF cycle` (`5.318373` m) 与 `data2 true_tuned cycle` (`1.186893` m) 的 direct A/B 事实上已经具备，可直接用于后续文档论证。
+- next_step:
+  - 把 corrected 第十一组和 direct A/B 结论同步进 `算法文档/可观性分析讨论与InEKF算法.tex`，并在文中显式写明旧 raw-NHC 结果为何被 supersede。
+  - 若要继续追机制，下一步应解释为什么 tuned `true_iekf` 在“周期性 GNSS 回归 + 超低频 NHC”下会优于 full-GNSS ESKF，而不是继续围绕旧错误组做归因。
+
+### session_id: 20260312-2150-representative-data4-conflict-check
+
+- timestamp: 2026-03-12 21:50 (local)
+- objective: 核对用户指出的 `representative_navigation_interactive_report.html` 中 `data4_gnss30_eskf RMSE=51.37` 与新分组报告中 `145.23` 的冲突，确认是否为 best-NHC 选错，还是旧报告沿用了历史口径。
+- scope:
+  - 读取 `walkthrough.md` 中 `data4` 相关历史实验条目，定位 `51.37` 的来源。
+  - 检查 `interactive_nav_report.py` 当前 `representative` 报告仍引用的 `data4_gnss30_eskf` 数据源。
+  - 对比 `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`、`output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_ans.yaml` 与当前 `config_data4_gnss30_eskf.yaml`。
+  - 与 2026-03-12 fresh sweep `EXP-20260312-data4-gnss30-nhc-sweep-r1` 做数值对照。
+- changed_files:
+  - `walkthrough.md`
+- configs:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_ans.yaml`
+  - `config_data4_gnss30_eskf.yaml`
+- commands:
+  - `Select-String walkthrough.md -Pattern '51.374|data4_gnss30_eskf|EXP-20260310-data4-imu-precision-r1|EXP-20260305-data4-main4-regression-r1'`
+  - `Select-String scripts/analysis/interactive_nav_report.py -Pattern 'data4_gnss30_eskf|EXP-20260310-data4-imu-precision-r1|cfg_gnss30_eskf.yaml'`
+  - `Select-String output/html/representative_navigation_interactive_report.html -Pattern '51.374|data4_gnss30_eskf|data4 GNSS30'`
+  - `Get-Content output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml`
+  - `Get-Content output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_ans.yaml`
+  - `Get-Content config_data4_gnss30_eskf.yaml`
+  - `git diff --no-index output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml config_data4_gnss30_eskf.yaml`
+  - `git diff --no-index output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_ans.yaml config_data4_gnss30_eskf.yaml`
+- artifacts:
+  - `output/html/representative_navigation_interactive_report.html`
+  - `output/html/dataset_partitioned_navigation_interactive_report.html`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/metrics_summary.csv`
+  - `output/review/EXP-20260312-data4-gnss30-nhc-sweep-r1/metrics.csv`
+- metrics:
+  - old representative source: `EXP-20260305-data4-main4-regression-r1` / `EXP-20260310-data4-imu-precision-r1` 中 `data4_gnss30_eskf` RMSE3D≈`51.371318~51.374` m。
+  - fresh current-code sweep: `data4_gnss30_eskf raw=281.328288` m，best `5Hz=145.233540` m。
+  - 旧配置与当前 `config_data4_gnss30_eskf.yaml` 的 solver 配置差异仅见 `output_path` 与 `enable_consistency_log`；因此该冲突不是由 IMU 型号或主配置切换造成，而是历史产物与当前代码快照不一致。
+- artifact_mtime:
+  - `output/html/representative_navigation_interactive_report.html`: `2026-03-12 14:42:33`
+  - `output/html/dataset_partitioned_navigation_interactive_report.html`: `2026-03-12 16:26:29`
+  - `output/review/EXP-20260305-data4-main4-regression-r1/metrics_summary.csv`: `2026-03-05 17:12:04`
+  - `output/review/EXP-20260312-data4-gnss30-nhc-sweep-r1/metrics.csv`: `2026-03-12 16:01:23`
+- config_hash_or_mtime:
+  - `output/review/EXP-20260305-data4-main4-regression-r1/cfg_gnss30_eskf.yaml` 与 `config_data4_gnss30_eskf.yaml` 的功能差异仅为 `output_path` 与 `enable_consistency_log`。
+  - `output/review/EXP-20260310-data4-imu-precision-r1/cfg_data4_gnss30_eskf_imu_ans.yaml` 与 `config_data4_gnss30_eskf.yaml` 也基本一致，仅 `output_path` 不同。
+- dataset_time_window:
+  - data4 GNSS30 window: `275309.0 -> 277300.0`
+  - GNSS 调度: `head_ratio = 0.3`
+- result_freshness_check:
+  - stale_or_conflict（`representative_navigation_interactive_report.html` 里的 `51.37` 依赖 2026-03-05/10 历史产物；当前 fresh final 结论应以 2026-03-12 sweep 为准）
+- observability_notes:
+  - 本会话未改动 `fusion.ablation.*` 或 `fusion.post_gnss_ablation.*`，也未新增冻结实验；仅做报告口径核验。
+  - 冲突发生在同一 `GNSS30` 调度与同一 data4 主配置下，因此它反映的是“历史代码快照 vs 当前代码快照”的差异，而不是不同状态块冻结或不同观测窗口造成的差异。
+- decision:
+  - 用户指出的问题成立：`representative_navigation_interactive_report.html` 中的 `data4_gnss30_eskf=51.37` 不能再与当前 fresh sweep `145.23` 混用为同一口径。
+  - 当前更可靠的最终结论应以 2026-03-12 fresh sweep 和新分组 HTML 为准；旧 representative 报告中的该条 data4 指标应视为历史参考，至少需要标注为 historical/stale。
+- next_step:
+  - 若仍需保留 `representative_navigation_interactive_report.html`，应在相应页面加上“historical result / stale_or_conflict”说明，或直接将其 data4 GNSS30 页面替换为 fresh 2026-03-12 产物。
+  - 在 `.tex` 和 HTML 说明中明确：`data4_gnss30_eskf` 的 2026-03-12 current-code 口径为 raw=`281.33`、best `5Hz=145.23`，不要再引用 `51.37` 作为当前最终数值。

@@ -12,6 +12,7 @@ ESKF融合导航结果可视化分析脚本
   2. 旧格式 (KF-GINS): 经纬高坐标，51列（含std列）
 """
 
+import argparse
 import os
 import glob
 import pandas as pd
@@ -47,6 +48,21 @@ def ecef_to_lla(x, y, z):
     N = WGS84_A / np.sqrt(1 - WGS84_E2 * sin_lat**2)
     alt = p / np.cos(lat) - N
     return np.degrees(lat), np.degrees(lon), alt
+
+
+def lla_to_ecef(lat_deg, lon_deg, alt_m):
+    """经纬高转 ECEF。"""
+    lat_rad = np.radians(lat_deg)
+    lon_rad = np.radians(lon_deg)
+    sin_lat = np.sin(lat_rad)
+    cos_lat = np.cos(lat_rad)
+    sin_lon = np.sin(lon_rad)
+    cos_lon = np.cos(lon_rad)
+    N = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat**2)
+    x = (N + alt_m) * cos_lat * cos_lon
+    y = (N + alt_m) * cos_lat * sin_lon
+    z = (N * (1.0 - WGS84_E2) + alt_m) * sin_lat
+    return x, y, z
 
 
 def ecef_vel_to_ned(vx, vy, vz, lat_rad, lon_rad):
@@ -710,40 +726,437 @@ def plot_ecef_position(data, axes):
     ax3.set_xlabel('时间 [s]')
 
 
+# ========== 标准结果模式 ==========
+
+STANDARD_STATE_FILES = [
+    'state_gyro_bias.png',
+    'state_accel_bias.png',
+    'state_gyro_scale.png',
+    'state_accel_scale.png',
+    'state_mounting_odo_scale.png',
+    'state_odo_lever_arm.png',
+    'state_gnss_lever_arm.png',
+]
+
+STANDARD_ERROR_FILES = [
+    'error_position_xyz.png',
+    'error_velocity_xyz.png',
+    'error_attitude_xyz.png',
+]
+
+STANDARD_SEGMENT_BAR_FILES = [
+    'outage_segment_rmse_xyz_bar.png',
+    'outage_segment_final_err_xyz_bar.png',
+]
+
+
+def load_truth_ecef_series(filepath):
+    """加载真值并统一到时间戳 + ECEF 位置。"""
+    ref = load_ref(filepath)
+    if 'timestamp' in ref.columns:
+        time = ref['timestamp'].to_numpy(dtype=float)
+    elif 'sec' in ref.columns:
+        time = ref['sec'].to_numpy(dtype=float)
+    else:
+        time = ref['time_sec'].to_numpy(dtype=float)
+
+    if all(col in ref.columns for col in ['x', 'y', 'z']):
+        xyz = ref[['x', 'y', 'z']].to_numpy(dtype=float)
+        return time, xyz
+
+    if not all(col in ref.columns for col in ['lat', 'lon', 'alt']):
+        raise ValueError(f'真值文件缺少经纬高或 ECEF 列: {filepath}')
+
+    x, y, z = lla_to_ecef(
+        ref['lat'].to_numpy(dtype=float),
+        ref['lon'].to_numpy(dtype=float),
+        ref['alt'].to_numpy(dtype=float),
+    )
+    xyz = np.column_stack([x, y, z])
+    return time, xyz
+
+
+def extract_sol_ecef_series(data):
+    """从结果中提取时间戳和 ECEF 位置。"""
+    fmt = data['_format'].iloc[0]
+    if fmt == 'new':
+        return (
+            data['timestamp'].to_numpy(dtype=float),
+            data[['fused_x', 'fused_y', 'fused_z']].to_numpy(dtype=float),
+        )
+
+    if not all(col in data.columns for col in ['lat', 'lon', 'alt']):
+        raise ValueError('旧格式结果缺少 lat/lon/alt，无法生成标准误差图。')
+    time = data['sec'].to_numpy(dtype=float) if 'sec' in data.columns else data['time_sec'].to_numpy(dtype=float)
+    x, y, z = lla_to_ecef(
+        data['lat'].to_numpy(dtype=float),
+        data['lon'].to_numpy(dtype=float),
+        data['alt'].to_numpy(dtype=float),
+    )
+    return time, np.column_stack([x, y, z])
+
+
+def interp_truth_xyz(sol_time, truth_time, truth_xyz):
+    interp = np.zeros((sol_time.size, 3), dtype=float)
+    for idx in range(3):
+        interp[:, idx] = np.interp(sol_time, truth_time, truth_xyz[:, idx])
+    return interp
+
+
+def interp_truth_columns(sol_time, ref_df, columns):
+    if 'timestamp' in ref_df.columns:
+        ref_time = ref_df['timestamp'].to_numpy(dtype=float)
+    elif 'sec' in ref_df.columns:
+        ref_time = ref_df['sec'].to_numpy(dtype=float)
+    else:
+        ref_time = ref_df['time_sec'].to_numpy(dtype=float)
+    interp = np.zeros((sol_time.size, len(columns)), dtype=float)
+    for idx, col in enumerate(columns):
+        interp[:, idx] = np.interp(sol_time, ref_time, ref_df[col].to_numpy(dtype=float))
+    return interp
+
+
+def wrap_angle_deg(angle_deg):
+    return ((angle_deg + 180.0) % 360.0) - 180.0
+
+
+def load_outage_windows_from_segments(filepath):
+    if not filepath or not os.path.isfile(filepath):
+        return []
+    segments = pd.read_csv(filepath, encoding='utf-8-sig')
+    required = {'start_time', 'end_time'}
+    if not required.issubset(segments.columns):
+        return []
+    windows = []
+    for _, row in segments.sort_values('segment_id' if 'segment_id' in segments.columns else 'start_time').iterrows():
+        windows.append((float(row['start_time']), float(row['end_time'])))
+    return windows
+
+
+def load_outage_segments_table(filepath):
+    if not filepath or not os.path.isfile(filepath):
+        return None
+    return pd.read_csv(filepath, encoding='utf-8-sig')
+
+
+def shade_outage_windows(ax, windows):
+    for start_t, end_t in windows:
+        ax.axvspan(start_t, end_t, color='#f0c987', alpha=0.22, zorder=0)
+
+
+def draw_unavailable(ax, title, message):
+    ax.set_title(title)
+    ax.text(0.5, 0.5, message, transform=ax.transAxes, ha='center', va='center', fontsize=11)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(False)
+
+
+def finalize_standard_figure(fig, save_path):
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=160, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  已保存: {save_path}')
+
+
+def resolve_truth_path(filepath, config_path=None, explicit_truth_path=None):
+    if explicit_truth_path:
+        return explicit_truth_path
+    if config_path and os.path.isfile(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f) or {}
+            fusion = cfg.get('fusion') or {}
+            pos_path = fusion.get('pos_path')
+            if pos_path:
+                resolved = os.path.abspath(pos_path)
+                if os.path.isfile(resolved):
+                    return resolved
+        except Exception:
+            pass
+    ref_path = find_ref_file(filepath)
+    if ref_path and os.path.isfile(ref_path):
+        return ref_path
+    return None
+
+
+def plot_standard_result_set(data, filepath, config_path, out_dir, outage_segments_path=None, truth_path=None):
+    os.makedirs(out_dir, exist_ok=True)
+
+    truth_path = resolve_truth_path(filepath, config_path=config_path, explicit_truth_path=truth_path)
+    if not truth_path:
+        raise FileNotFoundError('标准结果模式需要真值文件，但未能从配置或数据集自动定位。')
+
+    ref_df = load_ref(truth_path)
+    truth_t, truth_xyz = load_truth_ecef_series(truth_path)
+    sol_t, sol_xyz = extract_sol_ecef_series(data)
+    truth_interp = interp_truth_xyz(sol_t, truth_t, truth_xyz)
+    err_xyz = sol_xyz - truth_interp
+    outage_windows = load_outage_windows_from_segments(outage_segments_path)
+    segment_df = load_outage_segments_table(outage_segments_path)
+
+    radps_to_degh = 180.0 / np.pi * 3600.0
+    ms2_to_mgal = 1e5
+    ppm_scale = 1.0 if data['_format'].iloc[0] == 'new' else 1e6
+
+    if data['_format'].iloc[0] == 'new':
+        sol_vel = data[['vn', 've', 'vd']].to_numpy(dtype=float)
+        sol_att = data[['fused_roll', 'fused_pitch', 'fused_yaw']].to_numpy(dtype=float)
+    else:
+        sol_vel = data[['vn', 've', 'vd']].to_numpy(dtype=float)
+        sol_att = data[['roll', 'pitch', 'yaw']].to_numpy(dtype=float)
+
+    truth_vel = interp_truth_columns(sol_t, ref_df, ['vn', 've', 'vd'])
+    truth_att = interp_truth_columns(sol_t, ref_df, ['roll', 'pitch', 'yaw'])
+    vel_err = sol_vel - truth_vel
+    att_err = wrap_angle_deg(sol_att - truth_att)
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+    for ax, idx, color, label in zip(
+        axes,
+        [0, 1, 2],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['位置误差 X [m]', '位置误差 Y [m]', '位置误差 Z [m]'],
+    ):
+        ax.plot(sol_t, err_xyz[:, idx], color=color, linewidth=0.9)
+        ax.axhline(0.0, color='k', linestyle='--', linewidth=0.8, alpha=0.45)
+        shade_outage_windows(ax, outage_windows)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('GNSS outage 位置误差分量')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'error_position_xyz.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+    for ax, idx, color, label in zip(
+        axes,
+        [0, 1, 2],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['速度误差 Vn [m/s]', '速度误差 Ve [m/s]', '速度误差 Vd [m/s]'],
+    ):
+        ax.plot(sol_t, vel_err[:, idx], color=color, linewidth=0.9)
+        ax.axhline(0.0, color='k', linestyle='--', linewidth=0.8, alpha=0.45)
+        shade_outage_windows(ax, outage_windows)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('GNSS outage 速度误差分量')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'error_velocity_xyz.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+    for ax, idx, color, label in zip(
+        axes,
+        [0, 1, 2],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['姿态误差 Roll [deg]', '姿态误差 Pitch [deg]', '姿态误差 Yaw [deg]'],
+    ):
+        ax.plot(sol_t, att_err[:, idx], color=color, linewidth=0.9)
+        ax.axhline(0.0, color='k', linestyle='--', linewidth=0.8, alpha=0.45)
+        shade_outage_windows(ax, outage_windows)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('GNSS outage 姿态误差分量')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'error_attitude_xyz.png'))
+
+    if segment_df is not None and not segment_df.empty:
+        segment_ids = segment_df['segment_id'].to_numpy(dtype=int)
+        x = np.arange(len(segment_ids))
+        width = 0.24
+
+        fig, ax = plt.subplots(figsize=(14, 5.2))
+        ax.bar(x - width, segment_df['rmse_x_m'].to_numpy(dtype=float), width=width, label='RMSE X', color='#1f77b4')
+        ax.bar(x, segment_df['rmse_y_m'].to_numpy(dtype=float), width=width, label='RMSE Y', color='#d62728')
+        ax.bar(x + width, segment_df['rmse_z_m'].to_numpy(dtype=float), width=width, label='RMSE Z', color='#2ca02c')
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(item) for item in segment_ids])
+        ax.set_xlabel('Outage Segment ID')
+        ax.set_ylabel('位置 RMSE [m]')
+        ax.set_title('各 outage 段位置 RMSE 柱状图')
+        ax.grid(True, axis='y', alpha=0.3)
+        ax.legend()
+        finalize_standard_figure(fig, os.path.join(out_dir, 'outage_segment_rmse_xyz_bar.png'))
+
+        fig, ax = plt.subplots(figsize=(14, 5.2))
+        ax.bar(
+            x - width,
+            segment_df['final_err_x_m'].to_numpy(dtype=float),
+            width=width,
+            label='Final Err X',
+            color='#1f77b4',
+        )
+        ax.bar(
+            x,
+            segment_df['final_err_y_m'].to_numpy(dtype=float),
+            width=width,
+            label='Final Err Y',
+            color='#d62728',
+        )
+        ax.bar(
+            x + width,
+            segment_df['final_err_z_m'].to_numpy(dtype=float),
+            width=width,
+            label='Final Err Z',
+            color='#2ca02c',
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(item) for item in segment_ids])
+        ax.set_xlabel('Outage Segment ID')
+        ax.set_ylabel('末时刻位置误差 [m]')
+        ax.set_title('各 outage 段末时刻位置误差柱状图')
+        ax.grid(True, axis='y', alpha=0.3)
+        ax.legend()
+        finalize_standard_figure(fig, os.path.join(out_dir, 'outage_segment_final_err_xyz_bar.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    for ax, suffix, color, label in zip(
+        axes,
+        ['x', 'y', 'z'],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['陀螺零偏 X [deg/h]', '陀螺零偏 Y [deg/h]', '陀螺零偏 Z [deg/h]'],
+    ):
+        col = f'bg_{suffix}' if data['_format'].iloc[0] == 'new' else f'gb_{suffix}'
+        ax.plot(sol_t, data[col].to_numpy(dtype=float) * radps_to_degh, color=color, linewidth=0.9)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('陀螺零偏状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_gyro_bias.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    for ax, suffix, color, label in zip(
+        axes,
+        ['x', 'y', 'z'],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['加计零偏 X [mGal]', '加计零偏 Y [mGal]', '加计零偏 Z [mGal]'],
+    ):
+        col = f'ba_{suffix}' if data['_format'].iloc[0] == 'new' else f'ab_{suffix}'
+        ax.plot(sol_t, data[col].to_numpy(dtype=float) * ms2_to_mgal, color=color, linewidth=0.9)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('加计零偏状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_accel_bias.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    for ax, suffix, color, label in zip(
+        axes,
+        ['x', 'y', 'z'],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['陀螺比例因子 X [ppm]', '陀螺比例因子 Y [ppm]', '陀螺比例因子 Z [ppm]'],
+    ):
+        ax.plot(sol_t, data[f'sg_{suffix}'].to_numpy(dtype=float) * ppm_scale, color=color, linewidth=0.9)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('陀螺比例因子状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_gyro_scale.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    for ax, suffix, color, label in zip(
+        axes,
+        ['x', 'y', 'z'],
+        ['#1f77b4', '#d62728', '#2ca02c'],
+        ['加计比例因子 X [ppm]', '加计比例因子 Y [ppm]', '加计比例因子 Z [ppm]'],
+    ):
+        ax.plot(sol_t, data[f'sa_{suffix}'].to_numpy(dtype=float) * ppm_scale, color=color, linewidth=0.9)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('加计比例因子状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_accel_scale.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    if data['_format'].iloc[0] == 'new':
+        axes[0].plot(sol_t, data['mounting_pitch'].to_numpy(dtype=float), color='#d62728', linewidth=0.9)
+        axes[0].set_ylabel('安装俯仰角 [deg]')
+        axes[0].grid(True, alpha=0.3)
+        axes[1].plot(sol_t, data['mounting_yaw'].to_numpy(dtype=float), color='#2ca02c', linewidth=0.9)
+        axes[1].set_ylabel('安装航向角 [deg]')
+        axes[1].grid(True, alpha=0.3)
+        axes[2].plot(sol_t, data['odo_scale'].to_numpy(dtype=float), color='#1f77b4', linewidth=0.9)
+        axes[2].set_ylabel('里程计比例因子')
+        axes[2].grid(True, alpha=0.3)
+    else:
+        draw_unavailable(axes[0], '安装角与里程计比例因子', '旧格式结果不提供标准 mounting/odo_state 映射。')
+        axes[1].axis('off')
+        axes[2].axis('off')
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('安装角与里程计比例因子状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_mounting_odo_scale.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    if all(col in data.columns for col in ['lever_x', 'lever_y', 'lever_z']):
+        for ax, col, color, label in zip(
+            axes,
+            ['lever_x', 'lever_y', 'lever_z'],
+            ['#1f77b4', '#d62728', '#2ca02c'],
+            ['ODO 杆臂 X [m]', 'ODO 杆臂 Y [m]', 'ODO 杆臂 Z [m]'],
+        ):
+            ax.plot(sol_t, data[col].to_numpy(dtype=float), color=color, linewidth=0.9)
+            ax.set_ylabel(label)
+            ax.grid(True, alpha=0.3)
+    else:
+        draw_unavailable(axes[0], 'ODO 杆臂状态', '结果文件缺少 lever_x/y/z。')
+        axes[1].axis('off')
+        axes[2].axis('off')
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('ODO 杆臂状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_odo_lever_arm.png'))
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
+    if all(col in data.columns for col in ['gnss_lever_x', 'gnss_lever_y', 'gnss_lever_z']):
+        for ax, col, color, label in zip(
+            axes,
+            ['gnss_lever_x', 'gnss_lever_y', 'gnss_lever_z'],
+            ['#1f77b4', '#d62728', '#2ca02c'],
+            ['GNSS 杆臂 X [m]', 'GNSS 杆臂 Y [m]', 'GNSS 杆臂 Z [m]'],
+        ):
+            ax.plot(sol_t, data[col].to_numpy(dtype=float), color=color, linewidth=0.9)
+            ax.set_ylabel(label)
+            ax.grid(True, alpha=0.3)
+    else:
+        draw_unavailable(axes[0], 'GNSS 杆臂状态', '结果文件缺少 gnss_lever_x/y/z。')
+        axes[1].axis('off')
+        axes[2].axis('off')
+    axes[-1].set_xlabel('时间戳 [s]')
+    fig.suptitle('GNSS 杆臂状态')
+    finalize_standard_figure(fig, os.path.join(out_dir, 'state_gnss_lever_arm.png'))
+
+
 # ========== 主函数 ==========
 
-def main():
-    if len(sys.argv) not in (2, 3):
-        print("用法: python plot_navresult.py <结果文件> [配置文件]")
-        print("示例: python plot_navresult.py SOL_data4_gnss.txt")
-        print("示例: python plot_navresult.py SOL_data4_gnss30_true_iekf.txt config_data4_gnss30_true_iekf.yaml")
-        sys.exit(1)
+def parse_args():
+    parser = argparse.ArgumentParser(description='导航结果绘图工具')
+    parser.add_argument('result_file', help='SOL 结果文件路径')
+    parser.add_argument('config_file', nargs='?', help='对应配置文件路径')
+    parser.add_argument('--mode', choices=['legacy', 'standard'], default='legacy', help='legacy 保持旧图输出；standard 输出标准结果图')
+    parser.add_argument('--output-dir', default=None, help='显式输出目录；legacy 缺省时仍使用 output/result_*')
+    parser.add_argument('--outage-segments', default=None, help='标准模式下用于阴影标注的 outage_segments.csv')
+    parser.add_argument('--truth-path', default=None, help='显式指定真值文件路径，优先级高于配置中的 pos_path')
+    return parser.parse_args()
 
-    filepath = sys.argv[1]
-    data = load_data(filepath)
-    if data is None:
-        print("数据加载失败")
-        sys.exit(1)
 
+def infer_legacy_output_dir(filepath):
+    basename = os.path.splitext(os.path.basename(filepath))[0]
+    parts = basename.replace('SOL_', '').replace('_gnss', '').replace('_uwb', '')
+    return os.path.join('output', f'result_{parts}') if parts else os.path.join('output', 'result')
+
+
+def run_legacy_mode(data, filepath, config_path, explicit_output_dir=None):
     fmt = data['_format'].iloc[0]
     print(f"已加载 {len(data)} 条记录, 共 {data.shape[1]} 列")
     print(f"列名: {[c for c in data.columns if c != '_format']}")
 
-    # 确定输出目录：从文件名推断 (SOL_data4_gnss.txt -> result_data4)
-    basename = os.path.splitext(os.path.basename(filepath))[0]  # e.g. SOL_data4_gnss
-    # 尝试提取 data* 部分
-    parts = basename.replace('SOL_', '').replace('_gnss', '').replace('_uwb', '')
-    out_dir = os.path.join('output', f'result_{parts}') if parts else os.path.join('output', 'result')
+    out_dir = explicit_output_dir or infer_legacy_output_dir(filepath)
     os.makedirs(out_dir, exist_ok=True)
     print(f"图像将保存到: {os.path.abspath(out_dir)}")
 
-    figure_names = []  # (fig, filename) pairs
+    figure_names = []
     figures = []
 
-    # ---- 加载真值 ----
     ref = None
     ref_path = find_ref_file(filepath)
-    config_path = sys.argv[2] if len(sys.argv) == 3 else find_config_file(filepath)
     vehicle_vel_meta = maybe_add_vehicle_velocity(data, config_path)
     if vehicle_vel_meta is not None:
         base_roll, base_pitch, base_yaw = vehicle_vel_meta['mounting_base_deg']
@@ -758,7 +1171,6 @@ def main():
     else:
         print("未找到对应真值文件，仅绘制融合结果")
 
-    # ---- 第1页: 轨迹 + 高度 ----
     fig1 = create_figure('导航结果 — 轨迹与高度')
     ax_traj = fig1.add_subplot(2, 2, (1, 2))
     plot_trajectory_2d(data, ax_traj, ref)
@@ -766,7 +1178,6 @@ def main():
     plot_altitude(data, ax_alt, ref)
     if fmt == 'new':
         ax_ecef = fig1.add_subplot(2, 2, 4)
-        # 绘制3D轨迹的距离
         dx = data['fused_x'] - data['fused_x'].iloc[0]
         dy = data['fused_y'] - data['fused_y'].iloc[0]
         dz = data['fused_z'] - data['fused_z'].iloc[0]
@@ -779,14 +1190,12 @@ def main():
     figures.append(fig1)
     figure_names.append((fig1, '01_trajectory_altitude.png'))
 
-    # ---- 第2页: 速度 ----
     fig2 = create_figure('导航结果 — 速度 (NED)')
     axes2 = [fig2.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_velocity(data, axes2, ref)
     figures.append(fig2)
     figure_names.append((fig2, '02_velocity_NED.png'))
 
-    # ---- 第2b页: 车体 v 系速度 ----
     if vehicle_vel_meta is not None:
         fig2b = create_figure('导航结果 — 速度 (车体 v 系)')
         axes2b = [fig2b.add_subplot(3, 1, i) for i in range(1, 4)]
@@ -794,42 +1203,36 @@ def main():
         figures.append(fig2b)
         figure_names.append((fig2b, '02b_velocity_vehicle_v.png'))
 
-    # ---- 第3页: 姿态角 ----
     fig3 = create_figure('导航结果 — 姿态角')
     axes3 = [fig3.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_attitude(data, axes3, ref)
     figures.append(fig3)
     figure_names.append((fig3, '03_attitude.png'))
 
-    # ---- 第4页: 陀螺仪零偏 ----
     fig4 = create_figure('导航结果 — 陀螺仪零偏')
     axes4 = [fig4.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_gyro_bias(data, axes4)
     figures.append(fig4)
     figure_names.append((fig4, '04_gyro_bias.png'))
 
-    # ---- 第5页: 加速度计零偏 ----
     fig5 = create_figure('导航结果 — 加速度计零偏')
     axes5 = [fig5.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_accel_bias(data, axes5)
     figures.append(fig5)
     figure_names.append((fig5, '05_accel_bias.png'))
 
-    # ---- 第6页: 陀螺仪比例因子 ----
     fig6 = create_figure('导航结果 — 陀螺仪比例因子')
     axes6 = [fig6.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_scale_factor_gyro(data, axes6)
     figures.append(fig6)
     figure_names.append((fig6, '06_gyro_scale_factor.png'))
 
-    # ---- 第7页: 加速度计比例因子 ----
     fig7 = create_figure('导航结果 — 加速度计比例因子')
     axes7 = [fig7.add_subplot(3, 1, i) for i in range(1, 4)]
     plot_scale_factor_accel(data, axes7)
     figures.append(fig7)
     figure_names.append((fig7, '07_accel_scale_factor.png'))
 
-    # ---- 第8页: 安装角 ----
     if fmt == 'new':
         fig8 = create_figure('导航结果 — 安装角 & 里程计比例因子')
         ax_mp = fig8.add_subplot(3, 1, 1)
@@ -844,7 +1247,6 @@ def main():
     figures.append(fig8)
     figure_names.append((fig8, '08_mount_angles.png'))
 
-    # ---- 第9页: 杆臂 (仅新格式) ----
     if fmt == 'new':
         fig9 = create_figure('导航结果 — 杆臂估计')
         axes9 = [fig9.add_subplot(3, 1, i) for i in range(1, 4)]
@@ -852,16 +1254,13 @@ def main():
         figures.append(fig9)
         figure_names.append((fig9, '09_lever_arm.png'))
 
-    # ---- 第10页: GNSS杆臂 (仅31列新格式) ----
-    if fmt == 'new':
-        if all(c in data.columns for c in ['gnss_lever_x', 'gnss_lever_y', 'gnss_lever_z']):
-            fig10 = create_figure('导航结果 — GNSS 杆臂估计')
-            axes10 = [fig10.add_subplot(3, 1, i) for i in range(1, 4)]
-            plot_gnss_lever_arm(data, axes10)
-            figures.append(fig10)
-            figure_names.append((fig10, '10_gnss_lever_arm.png'))
+    if fmt == 'new' and all(c in data.columns for c in ['gnss_lever_x', 'gnss_lever_y', 'gnss_lever_z']):
+        fig10 = create_figure('导航结果 — GNSS 杆臂估计')
+        axes10 = [fig10.add_subplot(3, 1, i) for i in range(1, 4)]
+        plot_gnss_lever_arm(data, axes10)
+        figures.append(fig10)
+        figure_names.append((fig10, '10_gnss_lever_arm.png'))
 
-    # ---- 第11页: ECEF原始坐标 (仅新格式) ----
     if fmt == 'new':
         fig11 = create_figure('导航结果 — ECEF 位置')
         axes11 = [fig11.add_subplot(3, 1, i) for i in range(1, 4)]
@@ -869,9 +1268,7 @@ def main():
         figures.append(fig11)
         figure_names.append((fig11, '11_ecef_position.png'))
 
-    # ---- 旧格式专属: 标准差页面 ----
     if fmt == 'old' and 'std_lat' in data.columns:
-        # 位置标准差
         fig_pstd = create_figure('导航结果 — 位置不确定度 (3σ)')
         axes_pstd = [fig_pstd.add_subplot(3, 1, i) for i in range(1, 4)]
         time = get_time(data)
@@ -916,7 +1313,6 @@ def main():
         figures.append(fig_astd)
         figure_names.append((fig_astd, '11_attitude_std.png'))
 
-    # 调整布局并保存
     for fig, fname in figure_names:
         fig.tight_layout(rect=[0, 0.02, 1, 0.95])
         save_path = os.path.join(out_dir, fname)
@@ -925,6 +1321,52 @@ def main():
         print(f"  已保存: {save_path}")
 
     print(f"\n共保存 {len(figure_names)} 张图像到 {os.path.abspath(out_dir)}")
+
+
+def run_standard_mode(data, filepath, config_path, output_dir, outage_segments_path=None, truth_path=None):
+    if not output_dir:
+        raise ValueError('standard 模式必须通过 --output-dir 指定输出目录。')
+    print(f"已加载 {len(data)} 条记录, 共 {data.shape[1]} 列")
+    print(f"标准结果图输出目录: {os.path.abspath(output_dir)}")
+    maybe_add_vehicle_velocity(data, config_path)
+    plot_standard_result_set(
+        data,
+        filepath=filepath,
+        config_path=config_path,
+        out_dir=output_dir,
+        outage_segments_path=outage_segments_path,
+        truth_path=truth_path,
+    )
+    total_files = len(STANDARD_ERROR_FILES) + len(STANDARD_STATE_FILES) + len(STANDARD_SEGMENT_BAR_FILES)
+    print(f"\n标准模式共保存 {total_files} 张图像到 {os.path.abspath(output_dir)}")
+
+
+def main():
+    args = parse_args()
+    filepath = args.result_file
+    data = load_data(filepath)
+    if data is None:
+        print("数据加载失败")
+        sys.exit(1)
+
+    config_path = args.config_file or find_config_file(filepath)
+    if args.mode == 'standard':
+        run_standard_mode(
+            data,
+            filepath=filepath,
+            config_path=config_path,
+            output_dir=args.output_dir,
+            outage_segments_path=args.outage_segments,
+            truth_path=args.truth_path,
+        )
+        return
+
+    run_legacy_mode(
+        data,
+        filepath=filepath,
+        config_path=config_path,
+        explicit_output_dir=args.output_dir,
+    )
 
 
 if __name__ == '__main__':

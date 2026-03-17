@@ -65,6 +65,9 @@ SECTION_COLORS = {
     "group6": ["#2E75D6", "#E67E22"],
     "group7": ["#2E75D6", "#1FA187", "#E67E22", "#8D77C6"],
     "group8": ["#2E75D6", "#1696A3", "#D39B3A", "#B55D89"],
+    "group9": ["#2E75D6", "#1FA187", "#E67E22", "#B55D89"],
+    "group10": ["#C0392B", "#27AE60", "#D39B3A", "#8D77C6"],
+    "group11": ["#2E75D6", "#C0392B"],
 }
 
 REPORT_FONT_SANS = '"Times New Roman", "Songti SC", "SimSun", "STSong", serif'
@@ -77,7 +80,7 @@ CATEGORY_SPECS = [
         [
             ("vn_err_mps", "北向速度误差 <i>v</i><sub>n</sub> [m/s]"),
             ("ve_err_mps", "东向速度误差 <i>v</i><sub>e</sub> [m/s]"),
-            ("vd_err_mps", "天向速度误差 <i>v</i><sub>d</sub> [m/s]"),
+            ("vd_err_mps", "地向速度误差 <i>v</i><sub>d</sub> [m/s]"),
         ],
     ),
     (
@@ -96,10 +99,10 @@ CATEGORY_SPECS = [
     ),
     (
         "level_angles",
-        "水平角误差",
+        "体系姿态角误差",
         [
-            ("pitch_err_deg", "Pitch 误差 [deg]"),
-            ("roll_err_deg", "Roll 误差 [deg]"),
+            ("pitch_err_deg", "俯仰角误差 [deg]"),
+            ("roll_err_deg", "横滚角误差 [deg]"),
         ],
     ),
     (
@@ -125,6 +128,7 @@ class SectionSpec:
     title: str
     subtitle: str
     cases: tuple[CaseSpec, ...]
+    shade_gnss_windows: bool = False
 
 
 @dataclass
@@ -153,6 +157,7 @@ class CaseResult:
     overview: dict[str, Any]
     plot_df: pd.DataFrame
     stats_by_category: dict[str, dict[str, dict[str, float]]]
+    gnss_windows_s: list[tuple[float, float]]
 
 
 @dataclass
@@ -163,6 +168,7 @@ class SectionResult:
     overview_table: pd.DataFrame
     stats_tables: dict[str, pd.DataFrame]
     split_time_s: float | None
+    gnss_windows_s: list[tuple[float, float]]
     trajectory_fig: go.Figure
     figures: dict[str, go.Figure]
 
@@ -170,12 +176,12 @@ class SectionResult:
 REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260309-interactive-report-group1",
-        title="第一组：全GNSS vs 30%GNSS",
-        subtitle="data4 全程 GNSS ESKF vs data4 前 30% GNSS ESKF",
+        title="第一组：全程GNSS 与前30%GNSS",
+        subtitle="data4 全程 GNSS ESKF 与 data4 前 30% GNSS ESKF 对比",
         cases=(
             CaseSpec(
                 case_id="data4_baseline_eskf",
-                label="data4 baseline ESKF",
+                label="data4 基线 ESKF",
                 sol_path="output/review/EXP-20260307-result-docs-r1/sol_links/SOL_data4_baseline_eskf_doc.txt",
                 config_path="output/review/EXP-20260305-data4-main4-regression-r1/cfg_baseline_eskf.yaml",
                 color=SECTION_COLORS["group1"][0],
@@ -191,8 +197,8 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     ),
     SectionSpec(
         exp_id="EXP-20260309-interactive-report-group2",
-        title="ESKF vs InEKF",
-        subtitle="data4 前 30% GNSS 条件下 ESKF vs InEKF",
+        title="第二组：ESKF 与 InEKF",
+        subtitle="data4 前 30% GNSS 条件下 ESKF 与 InEKF 对比",
         cases=(
             CaseSpec(
                 case_id="data4_gnss30_eskf",
@@ -212,19 +218,19 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     ),
     SectionSpec(
         exp_id="EXP-20260310-data2-gnss-outage-cycle-r1",
-        title="第三组：GNSS outage",
-        subtitle="data2 ESKF：全程 GNSS vs 900s 收敛后 300s/120s 周期 outage",
+        title="第三组：GNSS 周期开断",
+        subtitle="data2 ESKF：全程 GNSS 与 900 s 收敛后 300 s/120 s 周期断续 GNSS",
         cases=(
             CaseSpec(
                 case_id="data2_baseline_eskf",
-                label="data2 baseline ESKF",
+                label="data2 基线 ESKF",
                 sol_path="SOL_data2_baseline_eskf.txt",
                 config_path="config_data2_baseline_eskf.yaml",
                 color=SECTION_COLORS["group3"][0],
             ),
             CaseSpec(
                 case_id="data2_outage_eskf_cycle",
-                label="data2 ESKF outage cycle",
+                label="data2 ESKF 周期开断",
                 sol_path="output/review/EXP-20260310-data2-gnss-outage-cycle-r1/SOL_data2_eskf_gnss_outage_cycle.txt",
                 config_path="output/review/EXP-20260310-data2-gnss-outage-cycle-r1/cfg_data2_eskf_gnss_outage_cycle.yaml",
                 color=SECTION_COLORS["group3"][1],
@@ -234,7 +240,7 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260310-gnss-lever-fix-eskf",
         title="第四组：GNSS 杆臂偏差对照（ESKF）",
-        subtitle="data4 全程 GNSS，GNSS 杆臂自由估计 vs 固定真值（ESKF）",
+        subtitle="data4 全程 GNSS，GNSS 杆臂自由估计与固定真值对比（ESKF）",
         cases=(
             CaseSpec(
                 case_id="data4_lever_eskf_free",
@@ -255,7 +261,7 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260310-gnss-lever-fix-true-iekf",
         title="第五组：GNSS杆臂偏差对照（InEKF）",
-        subtitle="data4 全程 GNSS，GNSS 杆臂自由估计 vs 固定真值（InEKF）",
+        subtitle="data4 全程 GNSS，GNSS 杆臂自由估计与固定真值对比（InEKF）",
         cases=(
             CaseSpec(
                 case_id="data4_lever_inekf_free",
@@ -276,7 +282,7 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260310-gnss-vel-effect-r1",
         title="第六组：GNSS速度有无对照组（InEKF）",
-        subtitle="data4 全程 GNSS，InEKF，含 GNSS 速度 vs 仅位置约束",
+        subtitle="data4 全程 GNSS，InEKF，含 GNSS 速度与仅位置约束对比",
         cases=(
             CaseSpec(
                 case_id="data4_vel_with",
@@ -297,7 +303,7 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260310-inekf-mechanism-group7",
         title="第七组：InEKF 作用机理（data4 GNSS30）",
-        subtitle="data4 前 30% GNSS：ESKF vs InEKF + post-GNSS 冻结 (bg/mounting)",
+        subtitle="data4 前 30% GNSS：ESKF、InEKF 与 post-GNSS 冻结（bg/mounting）对比",
         cases=(
             CaseSpec(
                 case_id="data4_gnss30_eskf_ref",
@@ -308,21 +314,21 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
             ),
             CaseSpec(
                 case_id="data4_gnss30_true_full",
-                label="data4 InEKF full",
+                label="data4 InEKF 完整估计",
                 sol_path="output/review/EXP-20260310-inekf-mechanism-r1/SOL_data4_gnss30_true_full.txt",
                 config_path="output/review/EXP-20260310-inekf-mechanism-r1/cfg_data4_gnss30_true_full.yaml",
                 color=SECTION_COLORS["group7"][1],
             ),
             CaseSpec(
                 case_id="data4_gnss30_true_freeze_bg",
-                label="data4 freeze_bg",
+                label="data4 冻结 bg",
                 sol_path="output/review/EXP-20260310-inekf-mechanism-r1/SOL_data4_gnss30_true_freeze_bg.txt",
                 config_path="output/review/EXP-20260310-inekf-mechanism-r1/cfg_data4_gnss30_true_freeze_bg.yaml",
                 color=SECTION_COLORS["group7"][2],
             ),
             CaseSpec(
                 case_id="data4_gnss30_true_freeze_mount",
-                label="data4 freeze_mount",
+                label="data4 冻结 mounting",
                 sol_path="output/review/EXP-20260310-inekf-mechanism-r1/SOL_data4_gnss30_true_freeze_mount.txt",
                 config_path="output/review/EXP-20260310-inekf-mechanism-r1/cfg_data4_gnss30_true_freeze_mount.yaml",
                 color=SECTION_COLORS["group7"][3],
@@ -332,7 +338,7 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         exp_id="EXP-20260310-inekf-mechanism-group8",
         title="第八组：InEKF 作用机理（data2 GNSS30）",
-        subtitle="data2 前 30% GNSS：ESKF vs InEKF + post-GNSS 冻结 (bg/mounting)",
+        subtitle="data2 前 30% GNSS：ESKF、InEKF 与 post-GNSS 冻结（bg/mounting）对比",
         cases=(
             CaseSpec(
                 case_id="data2_gnss30_eskf_ref",
@@ -343,24 +349,115 @@ REPORT_SECTIONS: tuple[SectionSpec, ...] = (
             ),
             CaseSpec(
                 case_id="data2_gnss30_true_full",
-                label="data2 InEKF full",
+                label="data2 InEKF 完整估计",
                 sol_path="output/review/20260306-phase2c-bg-freeze/SOL_full.txt",
                 config_path="output/review/20260306-phase2c-bg-freeze/cfg_full.yaml",
                 color=SECTION_COLORS["group8"][1],
             ),
             CaseSpec(
                 case_id="data2_gnss30_true_freeze_bg",
-                label="data2 freeze_bg",
+                label="data2 冻结 bg",
                 sol_path="output/review/20260306-phase2c-bg-freeze/SOL_freeze_bg.txt",
                 config_path="output/review/20260306-phase2c-bg-freeze/cfg_freeze_bg.yaml",
                 color=SECTION_COLORS["group8"][2],
             ),
             CaseSpec(
                 case_id="data2_gnss30_true_freeze_mount",
-                label="data2 freeze_mount",
+                label="data2 冻结 mounting",
                 sol_path="output/review/20260306-phase2c-bg-freeze/SOL_freeze_mount.txt",
                 config_path="output/review/20260306-phase2c-bg-freeze/cfg_freeze_mount.yaml",
                 color=SECTION_COLORS["group8"][3],
+            ),
+        ),
+    ),
+    SectionSpec(
+        exp_id="EXP-20260311-interactive-report-group9",
+        title="第九组：NHC频率扫描（data2 GNSS30 ESKF）",
+        subtitle="固定 ODO=raw，对比 raw、50 Hz、30 Hz 与 1 Hz 的 NHC 更新频率",
+        cases=(
+            CaseSpec(
+                case_id="data2_gnss30_eskf_nhc_raw",
+                label="raw/raw",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/SOL_matched_odo_raw_nhc_raw.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/cfg_matched_odo_raw_nhc_raw.yaml",
+                color=SECTION_COLORS["group9"][0],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_eskf_nhc_50hz",
+                label="NHC 50 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_50hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_50hz.yaml",
+                color=SECTION_COLORS["group9"][1],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_eskf_nhc_30hz",
+                label="NHC 30 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/data2_gnss30_eskf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_30.000hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine/data2_gnss30_eskf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_30.000hz.yaml",
+                color=SECTION_COLORS["group9"][2],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_eskf_nhc_1hz",
+                label="NHC 1 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_1hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf/data2_gnss30_eskf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_1hz.yaml",
+                color=SECTION_COLORS["group9"][3],
+            ),
+        ),
+    ),
+    SectionSpec(
+        exp_id="EXP-20260311-interactive-report-group10",
+        title="第十组：NHC频率扫描（data2 GNSS30 InEKF）",
+        subtitle="固定 ODO=raw，对比 raw、10 Hz、1 Hz 与 0.75 Hz 的 NHC 更新频率（true_iekf 实现）",
+        cases=(
+            CaseSpec(
+                case_id="data2_gnss30_true_iekf_nhc_raw",
+                label="raw/raw",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/SOL_matched_odo_raw_nhc_raw.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/cfg_matched_odo_raw_nhc_raw.yaml",
+                color=SECTION_COLORS["group10"][0],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_true_iekf_nhc_10hz",
+                label="NHC 10 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_10hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_10hz.yaml",
+                color=SECTION_COLORS["group10"][1],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_true_iekf_nhc_1hz",
+                label="NHC 1 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_1hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf/data2_gnss30_true_iekf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_1hz.yaml",
+                color=SECTION_COLORS["group10"][2],
+            ),
+            CaseSpec(
+                case_id="data2_gnss30_true_iekf_nhc_075hz",
+                label="NHC 0.75 Hz",
+                sol_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/data2_gnss30_true_iekf/SOL_fixed_odo_nhc_sweep_odo_raw_nhc_0.750hz.txt",
+                config_path="output/review/EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine/data2_gnss30_true_iekf/cfg_fixed_odo_nhc_sweep_odo_raw_nhc_0.750hz.yaml",
+                color=SECTION_COLORS["group10"][3],
+            ),
+        ),
+    ),
+    SectionSpec(
+        exp_id="EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1",
+        title="第十一组：GNSS周期开断（data2 true_iekf最优）",
+        subtitle="对照组保持 data2 全GNSS ESKF；实验组使用当前 tuned true_iekf 最优配置（ODO raw + NHC 0.75Hz）并复用同一份 900 s 收敛 + 300/120 s 周期断续 GNSS 文件",
+        cases=(
+            CaseSpec(
+                case_id="data2_baseline_eskf_fresh",
+                label="data2 全GNSS ESKF",
+                sol_path="output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_baseline_eskf_fresh.txt",
+                config_path="output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_baseline_eskf_fresh.yaml",
+                color=SECTION_COLORS["group11"][0],
+            ),
+            CaseSpec(
+                case_id="data2_true_tuned_gnss_outage_cycle",
+                label="data2 true_iekf最优(0.75Hz) + 周期开断",
+                sol_path="output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/SOL_data2_true_tuned_gnss_outage_cycle.txt",
+                config_path="output/review/EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1/cfg_data2_true_tuned_gnss_outage_cycle.yaml",
+                color=SECTION_COLORS["group11"][1],
             ),
         ),
     ),
@@ -472,6 +569,19 @@ def rotation_to_euler_deg(rot: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.n
 
 def wrap_angle_deg(angle_deg: np.ndarray) -> np.ndarray:
     return (np.asarray(angle_deg) + 180.0) % 360.0 - 180.0
+
+
+def relative_euler_error_deg(
+    est_rot: np.ndarray, ref_rot: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Use relative rotation, not direct Euler subtraction, to avoid yaw/roll leakage into pitch.
+    rel_rot = np.einsum("...ij,...jk->...ik", est_rot, np.swapaxes(ref_rot, -1, -2))
+    roll_err_deg, pitch_err_deg, yaw_err_deg = rotation_to_euler_deg(rel_rot)
+    return (
+        wrap_angle_deg(roll_err_deg),
+        wrap_angle_deg(pitch_err_deg),
+        wrap_angle_deg(yaw_err_deg),
+    )
 
 
 def interp_linear(sol_t: np.ndarray, truth_t: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -631,18 +741,31 @@ def resolve_mounting_base_rpy_deg(
         return cache[dataset_tag], f"median:{dataset_tag}"
     return load_mounting_base_rpy_deg(config), "config"
 
+
+def resolve_input_path(config_path: Path, raw_path: str) -> Path:
+    data_path = Path(str(raw_path))
+    if data_path.is_absolute():
+        return data_path
+    candidate = (REPO_ROOT / data_path).resolve()
+    if candidate.exists():
+        return candidate
+    return (config_path.parent / data_path).resolve()
+
+
 def extract_truth_path(config: dict[str, Any], config_path: Path) -> Path:
     fusion_cfg = config.get("fusion") or {}
     truth_rel = fusion_cfg.get("pos_path")
     if not truth_rel:
         raise RuntimeError(f"fusion.pos_path missing in config: {config_path}")
-    truth_path = Path(str(truth_rel))
-    if truth_path.is_absolute():
-        return truth_path
-    candidate = (REPO_ROOT / truth_path).resolve()
-    if candidate.exists():
-        return candidate
-    return (config_path.parent / truth_path).resolve()
+    return resolve_input_path(config_path, str(truth_rel))
+
+
+def extract_gnss_path(config: dict[str, Any], config_path: Path) -> Path | None:
+    fusion_cfg = config.get("fusion") or {}
+    gnss_rel = fusion_cfg.get("gnss_path")
+    if not gnss_rel:
+        return None
+    return resolve_input_path(config_path, str(gnss_rel))
 
 
 def extract_split_time_s(config: dict[str, Any], truth: TruthBundle) -> float | None:
@@ -654,6 +777,79 @@ def extract_split_time_s(config: dict[str, Any], truth: TruthBundle) -> float | 
     if head_ratio <= 0.0:
         return None
     return float((truth.time[-1] - truth.time[0]) * head_ratio)
+
+
+def load_gnss_timestamps(path: Path) -> np.ndarray:
+    has_header = detect_has_header(path)
+    df = pd.read_csv(path, sep=r"\s+", header=0 if has_header else None, comment="#", usecols=[0])
+    timestamps = df.iloc[:, 0].to_numpy(dtype=float)
+    timestamps = timestamps[np.isfinite(timestamps)]
+    if timestamps.size == 0:
+        return timestamps
+    return np.unique(timestamps)
+
+
+def timestamps_to_windows(timestamps: np.ndarray) -> list[tuple[float, float]]:
+    if timestamps.size == 0:
+        return []
+    if timestamps.size == 1:
+        t = float(timestamps[0])
+        return [(t, t)]
+
+    dt = np.diff(timestamps)
+    positive_dt = dt[dt > 0.0]
+    nominal_dt = float(np.median(positive_dt)) if positive_dt.size else 0.0
+    # Ignore small timestamp jitter and sporadic sample drops; only long gaps mark GNSS-off windows.
+    gap_threshold = max(nominal_dt * 10.0, nominal_dt + 10.0) if nominal_dt > 0.0 else 10.0
+    gap_indices = np.where(dt > gap_threshold)[0]
+    start_indices = np.concatenate(([0], gap_indices + 1))
+    end_indices = np.concatenate((gap_indices, [timestamps.size - 1]))
+    extension = nominal_dt if nominal_dt > 0.0 else 0.0
+
+    windows: list[tuple[float, float]] = []
+    for start_idx, end_idx in zip(start_indices, end_indices):
+        start_t = float(timestamps[start_idx])
+        end_t = float(timestamps[end_idx] + extension)
+        windows.append((start_t, max(start_t, end_t)))
+    return windows
+
+
+def extract_gnss_windows_s(
+    config: dict[str, Any],
+    config_path: Path,
+    truth: TruthBundle,
+    cache: dict[Path, list[tuple[float, float]]],
+) -> list[tuple[float, float]]:
+    split_time_s = extract_split_time_s(config, truth)
+    if split_time_s is not None:
+        return [(0.0, split_time_s)]
+
+    gnss_path = extract_gnss_path(config, config_path)
+    if gnss_path is None or not gnss_path.exists():
+        return []
+    if gnss_path not in cache:
+        cache[gnss_path] = timestamps_to_windows(load_gnss_timestamps(gnss_path))
+
+    truth_start = float(truth.time[0])
+    truth_end = float(truth.time[-1])
+    windows_s: list[tuple[float, float]] = []
+    for abs_start, abs_end in cache[gnss_path]:
+        clipped_start = max(abs_start, truth_start)
+        clipped_end = min(abs_end, truth_end)
+        if clipped_end < clipped_start:
+            continue
+        windows_s.append((clipped_start - truth_start, clipped_end - truth_start))
+    return windows_s
+
+
+def select_section_gnss_windows(cases: list[CaseResult]) -> list[tuple[float, float]]:
+    for case in cases:
+        if len(case.gnss_windows_s) > 1:
+            return case.gnss_windows_s
+    for case in cases:
+        if case.gnss_windows_s:
+            return case.gnss_windows_s
+    return []
 
 
 def load_truth_bundle(path: Path, target_points: int) -> TruthBundle:
@@ -711,13 +907,20 @@ def compute_stats(values: np.ndarray) -> dict[str, float]:
     }
 
 
-def build_case_result(spec: CaseSpec, truth: TruthBundle, target_points: int, mounting_base_cache: dict[str, np.ndarray]) -> CaseResult:
+def build_case_result(
+    spec: CaseSpec,
+    truth: TruthBundle,
+    target_points: int,
+    mounting_base_cache: dict[str, np.ndarray],
+    gnss_window_cache: dict[Path, list[tuple[float, float]]],
+) -> CaseResult:
     sol_path = repo_path(spec.sol_path)
     cfg_path = repo_path(spec.config_path)
     sol_df = load_solution_frame(sol_path)
     config = load_yaml(cfg_path)
     mounting_base_deg, mounting_base_source = resolve_mounting_base_rpy_deg(config, cfg_path, mounting_base_cache)
     split_time_s = extract_split_time_s(config, truth)
+    gnss_windows_s = extract_gnss_windows_s(config, cfg_path, truth, gnss_window_cache)
 
     sol_time = sol_df["timestamp"].to_numpy(dtype=float)
     sol_time_sec = sol_time - truth.time[0]
@@ -756,6 +959,9 @@ def build_case_result(spec: CaseSpec, truth: TruthBundle, target_points: int, mo
         np.deg2rad(truth_pitch_interp),
         np.deg2rad(truth_yaw_interp),
     )
+    body_roll_err_deg, body_pitch_err_deg, _ = relative_euler_error_deg(
+        body_to_nav, truth_body_to_nav
+    )
 
     nav_vel = np.column_stack((sol_vn, sol_ve, sol_vd))
     truth_nav_vel = np.column_stack((truth_vn_interp, truth_ve_interp, truth_vd_interp))
@@ -782,8 +988,7 @@ def build_case_result(spec: CaseSpec, truth: TruthBundle, target_points: int, mo
     truth_vehicle_to_nav = np.einsum(
         "...ij,...jk->...ik", truth_body_to_nav, np.swapaxes(truth_body_to_vehicle, -1, -2)
     )
-    _, _, vehicle_yaw_deg = rotation_to_euler_deg(vehicle_to_nav)
-    _, _, truth_vehicle_yaw_deg = rotation_to_euler_deg(truth_vehicle_to_nav)
+    _, _, vehicle_heading_err_deg = relative_euler_error_deg(vehicle_to_nav, truth_vehicle_to_nav)
 
     pos_err_xyz = sol_xyz - truth_xyz_interp
     err3d = np.linalg.norm(pos_err_xyz, axis=1)
@@ -804,9 +1009,9 @@ def build_case_result(spec: CaseSpec, truth: TruthBundle, target_points: int, mo
             "vv_x_err_mps": vehicle_vel[:, 0] - truth_vehicle_vel[:, 0],
             "vv_y_err_mps": vehicle_vel[:, 1] - truth_vehicle_vel[:, 1],
             "vv_z_err_mps": vehicle_vel[:, 2] - truth_vehicle_vel[:, 2],
-            "vehicle_heading_err_deg": wrap_angle_deg(vehicle_yaw_deg - truth_vehicle_yaw_deg),
-            "pitch_err_deg": wrap_angle_deg(sol_pitch - truth_pitch_interp),
-            "roll_err_deg": wrap_angle_deg(sol_roll - truth_roll_interp),
+            "vehicle_heading_err_deg": vehicle_heading_err_deg,
+            "pitch_err_deg": body_pitch_err_deg,
+            "roll_err_deg": body_roll_err_deg,
         }
     )
 
@@ -835,6 +1040,7 @@ def build_case_result(spec: CaseSpec, truth: TruthBundle, target_points: int, mo
         overview=overview,
         plot_df=decimate_df(plot_df, target_points),
         stats_by_category=stats_by_category,
+        gnss_windows_s=gnss_windows_s,
     )
 
 
@@ -955,6 +1161,23 @@ def add_split_region(fig: go.Figure, split_time_s: float | None, rows: int) -> N
         )
 
 
+def add_gnss_window_regions(fig: go.Figure, gnss_windows_s: list[tuple[float, float]], rows: int) -> None:
+    for start_s, end_s in gnss_windows_s:
+        if end_s <= start_s:
+            continue
+        for row in range(1, rows + 1):
+            fig.add_vrect(
+                x0=start_s,
+                x1=end_s,
+                fillcolor="#DCE9D4",
+                opacity=0.35,
+                layer="below",
+                line_width=0,
+                row=row,
+                col=1,
+            )
+
+
 def make_trajectory_figure(section: SectionSpec, truth_plot_df: pd.DataFrame, cases: list[CaseResult]) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
@@ -964,7 +1187,7 @@ def make_trajectory_figure(section: SectionSpec, truth_plot_df: pd.DataFrame, ca
             mode="lines",
             name="真值",
             line=dict(color="#6A6A6A", width=1.1, dash="dash"),
-            hovertemplate="真值<br>East=%{x:.2f} m<br>North=%{y:.2f} m<extra></extra>",
+            hovertemplate="真值<br>东向=%{x:.2f} m<br>北向=%{y:.2f} m<extra></extra>",
         )
     )
     for case in cases:
@@ -975,13 +1198,13 @@ def make_trajectory_figure(section: SectionSpec, truth_plot_df: pd.DataFrame, ca
                 mode="lines",
                 name=case.spec.label,
                 line=dict(color=case.spec.color, width=1.15),
-                hovertemplate=f"{case.spec.label}<br>East=%{{x:.2f}} m<br>North=%{{y:.2f}} m<extra></extra>",
+                hovertemplate=f"{case.spec.label}<br>东向=%{{x:.2f}} m<br>北向=%{{y:.2f}} m<extra></extra>",
             )
         )
     fig.update_layout(
         title=f"{section.title} · 轨迹对比",
-        xaxis_title="East [m]",
-        yaxis_title="North [m]",
+        xaxis_title="东向 [m]",
+        yaxis_title="北向 [m]",
     )
     fig.update_yaxes(scaleanchor="x", scaleratio=1)
     return apply_report_style(fig, height=520)
@@ -993,6 +1216,7 @@ def make_error_figure(
     category_title: str,
     signal_defs: list[tuple[str, str]],
     split_time_s: float | None,
+    gnss_windows_s: list[tuple[float, float]],
 ) -> go.Figure:
     rows = len(signal_defs)
     fig = make_subplots(
@@ -1021,23 +1245,34 @@ def make_error_figure(
                 col=1,
             )
         fig.add_hline(y=0.0, line_width=0.65, line_color="#AFAFAF", line_dash="dot", row=row_idx, col=1)
+    add_gnss_window_regions(fig, gnss_windows_s, rows)
     add_split_region(fig, split_time_s, rows)
     fig.update_layout(title=f"{section.title} · {category_title}")
     fig.update_xaxes(title_text="时间 [s]", row=rows, col=1)
     return apply_report_style(fig, height=230 + 155 * rows)
 
 
-def build_section(spec: SectionSpec, truth_cache: dict[Path, TruthBundle], mounting_base_cache: dict[str, np.ndarray], target_points: int) -> SectionResult:
+def build_section(
+    spec: SectionSpec,
+    truth_cache: dict[Path, TruthBundle],
+    mounting_base_cache: dict[str, np.ndarray],
+    gnss_window_cache: dict[Path, list[tuple[float, float]]],
+    target_points: int,
+) -> SectionResult:
     first_config_path = repo_path(spec.cases[0].config_path)
     first_config = load_yaml(first_config_path)
     truth_path = extract_truth_path(first_config, first_config_path)
     truth = truth_cache.setdefault(truth_path, load_truth_bundle(truth_path, target_points))
-    cases = [build_case_result(case_spec, truth, target_points, mounting_base_cache) for case_spec in spec.cases]
+    cases = [
+        build_case_result(case_spec, truth, target_points, mounting_base_cache, gnss_window_cache)
+        for case_spec in spec.cases
+    ]
     split_candidates = [case.overview["gnss_stop_s"] for case in cases if case.overview["gnss_stop_s"] is not None]
     split_time_s = split_candidates[0] if split_candidates else None
+    gnss_windows_s = select_section_gnss_windows(cases) if spec.shade_gnss_windows else []
     stats_tables = build_stats_tables(cases)
     figures = {
-        category_key: make_error_figure(spec, cases, category_title, signal_defs, split_time_s)
+        category_key: make_error_figure(spec, cases, category_title, signal_defs, split_time_s, gnss_windows_s)
         for category_key, category_title, signal_defs in CATEGORY_SPECS
     }
     return SectionResult(
@@ -1047,15 +1282,21 @@ def build_section(spec: SectionSpec, truth_cache: dict[Path, TruthBundle], mount
         overview_table=build_overview_table(cases),
         stats_tables=stats_tables,
         split_time_s=split_time_s,
+        gnss_windows_s=gnss_windows_s,
         trajectory_fig=make_trajectory_figure(spec, truth.trajectory_plot_df, cases),
         figures=figures,
     )
 
 
-def build_representative_report(target_points: int = 4000) -> list[SectionResult]:
+def build_report_from_sections(section_specs: tuple[SectionSpec, ...] | list[SectionSpec], target_points: int = 4000) -> list[SectionResult]:
     truth_cache: dict[Path, TruthBundle] = {}
     mounting_base_cache: dict[str, np.ndarray] = {}
-    return [build_section(spec, truth_cache, mounting_base_cache, target_points) for spec in REPORT_SECTIONS]
+    gnss_window_cache: dict[Path, list[tuple[float, float]]] = {}
+    return [build_section(spec, truth_cache, mounting_base_cache, gnss_window_cache, target_points) for spec in section_specs]
+
+
+def build_representative_report(target_points: int = 4000) -> list[SectionResult]:
+    return build_report_from_sections(REPORT_SECTIONS, target_points=target_points)
 
 
 def render_section(section: SectionResult) -> None:
@@ -1067,7 +1308,10 @@ def render_section(section: SectionResult) -> None:
     section.trajectory_fig.show()
     display(Markdown("### 总览指标"))
     display(section.overview_table.round(3))
-    note = "虚线表示 GNSS 关闭分界线。" if section.split_time_s is not None else "该组不包含 GNSS 关闭分界线。"
+    if section.gnss_windows_s:
+        note = "背景色表示 GNSS 可用时段。"
+    else:
+        note = "虚线表示 GNSS 关闭分界线。" if section.split_time_s is not None else "该组不包含 GNSS 关闭分界线。"
     display(Markdown(note))
     for category_key, category_title, _ in CATEGORY_SPECS:
         display(Markdown(f"### {category_title}"))

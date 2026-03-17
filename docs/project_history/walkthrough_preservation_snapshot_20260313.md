@@ -1,0 +1,241 @@
+# walkthrough_preservation_snapshot_20260313.md
+
+Source: `walkthrough.md` before importance-based compression on `2026-03-13`.
+
+## Source Snapshot
+- source_path: `D:\因子图算法科研训练\UWB\walkthrough.md`
+- bytes_before: `258979`
+- lines_before: `2749`
+- experiment_rows: `84`
+- issue_rows: `10`
+- hypothesis_rows: `13`
+- session_blocks: `49`
+- phase_summary_session_mentions: `30`
+
+## Keep Policy Snapshot
+- current_key_experiments: `EXP-20260311-codefix-r1`、`EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf`、`EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine`、`EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf`、`EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine`、`EXP-20260312-inekf-mechanism-attribution-r2`、`EXP-20260312-inekf-mechanism-rate-vs-weight-r2`、`EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1`、`EXP-20260312-data4-p0diag-check-r1`、`EXP-20260312-data4-gnss30-nhc-sweep-r2`、`EXP-20260312-dataset-report-cases-r2`、`EXP-20260313-dataset-partitioned-html-reader-r4`
+- current_key_sessions: `20260311-1022-project-code-review`、`20260311-1045-code-review-fixes-r1`、`20260312-1353-inekf-mechanism-r2-complete`、`20260312-1626-dataset-partitioned-report-r1`、`20260312-2216-data4-p0diag-root-cause-check`、`20260312-2230-data4-p0diag-rerun-and-html-refresh`、`20260313-0034-dataset-report-reader-copy`、`20260313-0103-dataset-report-reader-table-compaction`
+- current_issue_rows_kept_in_main: `ISSUE-007-inekf-tex-code-gap`、`ISSUE-20260312-representative-report-data4-stale`
+- current_open_hypotheses_kept_in_main: `HYP-1`、`HYP-6`、`HYP-7`、`HYP-8`、`HYP-9`、`HYP-10`、`HYP-11`、`HYP-12`、`HYP-13`
+
+## EXP IDs (100)
+- `EXP-20260304-data2-baseline-eskf`
+- `EXP-20260304-data2-baseline-inekf-ctrl`
+- `EXP-20260304-data2-gnss30-eskf-nofreeze`
+- `EXP-20260304-data2-gnss30-inekf`
+- `EXP-20260304-data2-gnss30-postfix-gnsslever-eskf`
+- `EXP-20260304-inekf-refactor-minrisk-debug`
+- `EXP-20260304-inekf-rewrite-no-fej`
+- `EXP-20260304-inekf-ri-fgqd-audit-r2`
+- `EXP-20260304-inekf-ri-gvelgyro-fix`
+- `EXP-20260304-inekf-ri-realization-codeoverhaul3`
+- `EXP-20260304-preexp-fix-regression`
+- `EXP-20260305-baseline-gmode-gnsspos-coupling-r1`
+- `EXP-20260305-baseline-gmode-gnssvel-mechanism-r1`
+- `EXP-20260305-baseline-gmode-sensitivity-r1`
+- `EXP-20260305-data2-gnsspos-mechanism-r2`
+- `EXP-20260305-data2-main4-docsync-r1`
+- `EXP-20260305-data2-mountroll-observability-r1`
+- `EXP-20260305-data2-postgnss-freeze-matrix-r2`
+- `EXP-20260305-data2-process-noise-regression-r1`
+- `EXP-20260305-data4-gnss30-freeze-matrix-r1`
+- `EXP-20260305-data4-gnssvel-sensitivity-r1`
+- `EXP-20260305-data4-inekf-switchscan-r1`
+- `EXP-20260305-data4-main4-regression-r1`
+- `EXP-20260305-inekf-ab-seq-r1`
+- `EXP-20260305-inekf-best4-regression-r1`
+- `EXP-20260305-inekf-deep-research-audit-r1`
+- `EXP-20260305-inekf-doubleoff-interaction-r1`
+- `EXP-20260305-inekf-fghi-sign-audit-r1`
+- `EXP-20260305-issue001-baseline-compare-r1`
+- `EXP-20260305-postgnss-freeze-matrix-r1`
+- `EXP-20260305-postgnss-headratio-robustness-r1`
+- `EXP-20260305-state21-30-drift-r1`
+- `EXP-20260306-consistency-audit-r1`
+- `EXP-20260306-gnss30-stateplots-r1`
+- `EXP-20260306-gnsspos-rframe-fix-r1`
+- `EXP-20260306-inekf-tex-code-audit-r1`
+- `EXP-20260306-jacobian-audit-r1`
+- `EXP-20260306-phase2b-attribution-r1`
+- `EXP-20260306-phase2c-bg-freeze-r1`
+- `EXP-20260306-true-iekf-ablation-r1`
+- `EXP-20260306-true-iekf-phase2-ablation-lite`
+- `EXP-20260306-true-iekf-phase2-r1`
+- `EXP-20260306-true-iekf-refactor-r1`
+- `EXP-20260307-jacobian-audit-r2`
+- `EXP-20260307-reset-floor-r1`
+- `EXP-20260307-result-docs-r1`
+- `EXP-20260307-update-reset-consistency-r1`
+- `EXP-20260307-vframe-velocity-plot-r1`
+- `EXP-20260308-inekf-doc-typeset-r1`
+- `EXP-20260308-inekf-doc-typeset-r2`
+- `EXP-20260308-inekf-doc-typeset-r3`
+- `EXP-20260308-result-docs-r1`
+- `EXP-20260309-inekf-doc-compile-check-r1`
+- `EXP-20260309-inekf-doc-symbols-r1`
+- `EXP-20260309-interactive-report-notebook-r1`
+- `EXP-20260310-data2-gnss-outage-cycle-r1`
+- `EXP-20260310-data4-imu-precision-r1`
+- `EXP-20260310-gnss-lever-fix-r1`
+- `EXP-20260310-gnss-vel-effect-r1`
+- `EXP-20260310-inekf-mechanism-r1`
+- `EXP-20260310-interactive-report-html-r1`
+- `EXP-20260310-interactive-report-html-r2`
+- `EXP-20260310-interactive-report-html-r3`
+- `EXP-20260310-interactive-report-html-r4`
+- `EXP-20260310-mounting-median-r1`
+- `EXP-20260311-codefix-r1`
+- `EXP-20260311-html-accuracy-audit-r1`
+- `EXP-20260311-html-attitude-cn-audit-r1`
+- `EXP-20260311-interactive-attitude-error-fix-r1`
+- `EXP-20260311-interactive-report-html-r5`
+- `EXP-20260311-odo-nhc-rate-sweep`
+- `EXP-20260311-odo-nhc-rate-sweep-r`
+- `EXP-20260311-odo-nhc-rate-sweep-r1`
+- `EXP-20260311-odo-nhc-rate-sweep-r2`
+- `EXP-20260311-odo-nhc-rate-sweep-r2-data2-gnss30-eskf`
+- `EXP-20260311-odo-nhc-rate-sweep-r2b-data2-gnss30-eskf-refine`
+- `EXP-20260311-odo-nhc-rate-sweep-r3`
+- `EXP-20260311-odo-nhc-rate-sweep-r3-data2-gnss30-true-iekf`
+- `EXP-20260311-odo-nhc-rate-sweep-r3b-data2-gnss30-true-iekf-refine`
+- `EXP-20260311-odo-nhc-rate-sweep-smoke`
+- `EXP-20260311-project-code-review-r1`
+- `EXP-20260312`
+- `EXP-20260312-`
+- `EXP-20260312-data2-gnss-outage-cycle-inekf-best-r1`
+- `EXP-20260312-data2-gnss-outage-cycle-true-tuned-r1`
+- `EXP-20260312-data4-gnss30-nhc-sweep-r1`
+- `EXP-20260312-data4-gnss30-nhc-sweep-r2`
+- `EXP-20260312-data4-p0diag-check-r1`
+- `EXP-20260312-dataset-partitioned-html-r1`
+- `EXP-20260312-dataset-partitioned-html-r2`
+- `EXP-20260312-dataset-report-cases-r1`
+- `EXP-20260312-dataset-report-cases-r2`
+- `EXP-20260312-inekf-mechanism-attribution-r1`
+- `EXP-20260312-inekf-mechanism-attribution-r2`
+- `EXP-20260312-inekf-mechanism-rate-vs-weight-r1`
+- `EXP-20260312-inekf-mechanism-rate-vs-weight-r2`
+- `EXP-20260312-interactive-report-html-r6`
+- `EXP-20260312-interactive-report-html-r7`
+- `EXP-20260313-dataset-partitioned-html-reader-r3`
+- `EXP-20260313-dataset-partitioned-html-reader-r4`
+
+## ISSUE IDs (16)
+- `ISSUE-001`
+- `ISSUE-001-metric-conflict-baseline-inekf`
+- `ISSUE-002`
+- `ISSUE-002-manual-init-missing-truth-crash`
+- `ISSUE-003-gnss-load-nonfatal`
+- `ISSUE-004-inekf-fej-semantic-conflict`
+- `ISSUE-005`
+- `ISSUE-005-baseline-inekf-ri-regression`
+- `ISSUE-006-ri-process-noise-mapping-incomplete`
+- `ISSUE-007-inekf-tex-code-gap`
+- `ISSUE-008-true-gnsspos-r-cov-frame-bug`
+- `ISSUE-20260310-utf8-notebook-stdin`
+- `ISSUE-20260311-config-load-fallback`
+- `ISSUE-20260311-constraint-update-success-propagation`
+- `ISSUE-20260311-p0diag-dead-config`
+- `ISSUE-20260312-representative-report-data4-stale`
+
+## HYP IDs (16)
+- `HYP-1`
+- `HYP-10`
+- `HYP-11`
+- `HYP-12`
+- `HYP-13`
+- `HYP-14`
+- `HYP-15`
+- `HYP-16`
+- `HYP-2`
+- `HYP-3`
+- `HYP-4`
+- `HYP-5`
+- `HYP-6`
+- `HYP-7`
+- `HYP-8`
+- `HYP-9`
+
+## Session IDs (79)
+### From phase summary carry-forward
+- `20260304-1435-agent-doc-bootstrap`
+- `20260304-1505-agent-md-fix-bootstrap-and-context`
+- `20260304-1822-pre_experiment_audit`
+- `20260304-1855-fix-five-issues-and-md-check`
+- `20260305-0032-best4-regression-and-plot`
+- `20260305-0042-tidy-walkthrough-and-promote-inekf-baseline`
+- `20260305-1010-inekf-fghi-audit-and-doubleoff`
+- `20260305-1018-issue001-baseline-compare-refresh`
+- `20260305-1029-postgnss-freeze-matrix-r1`
+- `20260305-1033-baseline-gmode-sensitivity-r1`
+- `20260305-1039-postgnss-headratio-robustness-r1`
+- `20260305-1048-stage-summary-writeback`
+- `20260305-1058-gmode-gnssvel-and-state21-30-drift`
+- `20260305-1611-automation-worktree-overview`
+- `20260305-2222-inekf-eskf-data2-data4-pipeline`
+- `20260306-1003-inekf-tex-code-audit-r1`
+- `20260306-1012-inekf-architecture-choice`
+- `20260306-1128-true-iekf-refactor-and-compare-r1`
+- `20260306-1349-true-iekf-gnss30-ablation-r1`
+- `20260306-1600-github-sync-current-work`
+- `20260306-1654-true-iekf-phase2-and-tex-sync`
+- `20260306-1714-data4-vs-data2-gnss30-gap-analysis`
+- `20260306-1759-phase2b-data2-gnss30-diagnostics`
+- `20260306-1835-phase2b-heading-source-attribution`
+- `20260306-1848-phase2c-bg-freeze-validation`
+- `20260306-1902-gnss30-stateplots-export`
+- `20260306-2317-turning-vs-inekf-eskf-analysis`
+- `20260306-2336-program-audit-and-gnsspos-rframe-fix`
+- `20260307-0001-jacobian-audit-r1`
+- `20260307-0040-jacobian-audit-gnssvel-r2`
+
+### From full session blocks
+- `20260307-1005-compress-walkthrough-and-github-sync`
+- `20260307-1023-add-vframe-velocity-plots`
+- `20260307-1101-reset-covariance-audit-r1`
+- `20260308-0039-result-docs-r1`
+- `20260308-0054-inekf-doc-typeset-r1`
+- `20260308-0059-inekf-doc-typeset-r2`
+- `20260308-0102-inekf-doc-typeset-r3`
+- `20260309-1049-inekf-doc-symbols-r1`
+- `20260309-1107-inekf-doc-compile-check`
+- `20260309-2328-interactive-report-notebook-r1`
+- `20260310-0014-interactive-report-html-fix`
+- `20260310-0039-interactive-report-html-restyle`
+- `20260310-0105-interactive-report-html-pdf-style`
+- `20260310-gnss-lever-vel-experiments-html-sidebar`
+- `20260310-1545-mounting-median-report`
+- `20260310-1558-html-mounting-note`
+- `20260310-1643-inekf-mechanism-r1`
+- `20260310-1654-interactive-report-drop-group3`
+- `20260310-1710-interactive-report-add-analysis`
+- `20260310-1826-interactive-report-renumber`
+- `20260310-1854-data2-gnss-outage-cycle`
+- `20260310-1935-true-iekf-reset-audit`
+- `20260310-2015-imu-precision-report`
+- `20260310-1956-remove-imu-pages`
+- `20260310-2010-report-rename-cleanup`
+- `20260310-2326-github-sync`
+- `20260311-0019-report-attitude-error-fix`
+- `20260311-0044-html-attitude-cn-audit`
+- `20260311-0104-html-accuracy-audit`
+- `20260311-1022-project-code-review`
+- `20260311-1045-code-review-fixes-r1`
+- `20260311-1051-odo-nhc-update-interval-audit`
+- `20260311-1413-odo-nhc-rate-sweep`
+- `20260311-1442-data2-gnss30-eskf-nhc-sweep`
+- `20260311-1511-data2-gnss30-true-iekf-nhc-sweep`
+- `20260311-1532-html-report-exp9-exp10`
+- `20260312-1010-inekf-mechanism-attribution-r1`
+- `20260312-1128-inekf-mechanism-r2-partial`
+- `20260312-1353-inekf-mechanism-r2-complete`
+- `20260312-1410-data2-gnss-outage-cycle-inekf-best-and-html`
+- `20260312-1414-outage-cycle-inekf-best-handoff-check`
+- `20260312-1429-outage-cycle-inekf-best-reference-correction`
+- `20260312-1443-outage-cycle-true-tuned-replacement`
+- `20260312-1626-dataset-partitioned-report-r1`
+- `20260312-2150-representative-data4-conflict-check`
+- `20260312-2216-data4-p0diag-root-cause-check`
+- `20260312-2230-data4-p0diag-rerun-and-html-refresh`
+- `20260313-0034-dataset-report-reader-copy`
+- `20260313-0103-dataset-report-reader-table-compaction`

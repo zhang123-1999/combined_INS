@@ -111,6 +111,7 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
                          const MatrixXd &R, VectorXd *dx_out,
                          const StateMask *update_mask) {
   last_true_iekf_correction_.valid = false;
+  last_correction_debug_.valid = false;
   if (!initialized_ || y.size() == 0) {
     return false;
   }
@@ -120,6 +121,8 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
   }
 
   // K = P H^T (H P H^T + R)^{-1}
+  Matrix<double, kStateDim, kStateDim> P_prior = P_;
+  MatrixXd S = H * P_ * H.transpose() + R;
   MatrixXd K = ComputeKalmanGain(H, R);
   ApplyUpdateMaskToKalmanGain(K, update_mask);
   if (K.rows() != kStateDim || K.cols() != y.size() || !K.allFinite()) {
@@ -146,6 +149,16 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
     *dx_out = dx;
   }
   bool use_true_iekf = (fej_ != nullptr && fej_->UseTrueInEkfMode());
+  last_correction_debug_.valid = true;
+  last_correction_debug_.used_true_iekf = use_true_iekf;
+  last_correction_debug_.t_state = curr_imu_.t;
+  last_correction_debug_.P_prior = P_prior;
+  last_correction_debug_.y = y;
+  last_correction_debug_.H = H;
+  last_correction_debug_.R = R;
+  last_correction_debug_.S = S;
+  last_correction_debug_.K = K;
+  last_correction_debug_.dx = dx;
   if (use_true_iekf) {
     UpdateCovarianceJoseph(K, H, R);
     last_true_iekf_correction_.t_state = curr_imu_.t;
@@ -162,8 +175,16 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
     last_true_iekf_correction_.P_after_all = P_;
     last_true_iekf_correction_.valid = true;
   } else {
-    InjectErrorState(dx);
-    UpdateCovarianceJoseph(K, H, R);
+    bool apply_standard_reset =
+        (fej_ != nullptr && fej_->debug_enable_standard_reset_gamma);
+    if (apply_standard_reset) {
+      UpdateCovarianceJoseph(K, H, R);
+      InjectErrorState(dx);
+      ApplyStandardEskfReset(dx);
+    } else {
+      InjectErrorState(dx);
+      UpdateCovarianceJoseph(K, H, R);
+    }
   }
   return true;
 }
@@ -352,6 +373,9 @@ Matrix<double, kStateDim, kStateDim> EskfEngine::BuildTrueInEkfResetGamma(
     const VectorXd &dx) const {
   Matrix<double, kStateDim, kStateDim> Gamma =
       Matrix<double, kStateDim, kStateDim>::Identity();
+  if (fej_ != nullptr && fej_->debug_disable_true_reset_gamma) {
+    return Gamma;
+  }
   Vector3d rho_p_body = dx.segment<3>(StateIdx::kPos);
   Vector3d rho_v_body = dx.segment<3>(StateIdx::kVel);
   Vector3d phi_body = dx.segment<3>(StateIdx::kAtt);
@@ -368,6 +392,23 @@ Matrix<double, kStateDim, kStateDim> EskfEngine::BuildTrueInEkfResetGamma(
 
 void EskfEngine::ApplyTrueInEkfReset(const VectorXd &dx) {
   Matrix<double, kStateDim, kStateDim> Gamma = BuildTrueInEkfResetGamma(dx);
+  P_ = Gamma * P_ * Gamma.transpose();
+  P_ = 0.5 * (P_ + P_.transpose());
+  ApplyStateMaskToCov();
+}
+
+Matrix<double, kStateDim, kStateDim> EskfEngine::BuildStandardEskfResetGamma(
+    const VectorXd &dx) const {
+  Matrix<double, kStateDim, kStateDim> Gamma =
+      Matrix<double, kStateDim, kStateDim>::Identity();
+  const Vector3d dphi_ned = dx.segment<3>(StateIdx::kAtt);
+  Gamma.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) =
+      Matrix3d::Identity() - 0.5 * Skew(dphi_ned);
+  return Gamma;
+}
+
+void EskfEngine::ApplyStandardEskfReset(const VectorXd &dx) {
+  Matrix<double, kStateDim, kStateDim> Gamma = BuildStandardEskfResetGamma(dx);
   P_ = Gamma * P_ * Gamma.transpose();
   P_ = 0.5 * (P_ + P_.transpose());
   ApplyStateMaskToCov();

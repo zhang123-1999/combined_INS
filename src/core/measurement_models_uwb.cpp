@@ -17,6 +17,33 @@ bool UseHybridInEkf(const FejManager *fej) {
   return fej != nullptr && fej->enabled && !fej->true_iekf_mode;
 }
 
+enum class VelJacobianMode {
+  kEskf,
+  kTrueInEkf,
+  kHybridZero,
+};
+
+VelJacobianMode ResolveVelJacobianMode(const FejManager *fej) {
+  if (fej != nullptr) {
+    if (fej->debug_force_vel_jacobian == "eskf") {
+      return VelJacobianMode::kEskf;
+    }
+    if (fej->debug_force_vel_jacobian == "true_iekf") {
+      return VelJacobianMode::kTrueInEkf;
+    }
+    if (fej->debug_force_vel_jacobian == "hybrid_zero") {
+      return VelJacobianMode::kHybridZero;
+    }
+  }
+  if (UseTrueInEkf(fej)) {
+    return VelJacobianMode::kTrueInEkf;
+  }
+  if (UseHybridInEkf(fej)) {
+    return VelJacobianMode::kHybridZero;
+  }
+  return VelJacobianMode::kEskf;
+}
+
 void TransformAdditiveCoreJacobianToTrueInEkf(MatrixXd &H,
                                               const Matrix3d &C_bn) {
   if (H.cols() < StateIdx::kAtt + 3) {
@@ -103,9 +130,8 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
                                    const Vector3d &omega_ib_b_raw,
                                    double sigma_nhc_y, double sigma_nhc_z,
                                    const FejManager *fej) {
-  bool use_inekf = (fej != nullptr && fej->enabled);
-  bool use_true_iekf = UseTrueInEkf(fej);
-  bool use_hybrid_inekf = UseHybridInEkf(fej);
+  bool runtime_true_iekf = UseTrueInEkf(fej);
+  VelJacobianMode vel_mode = ResolveVelJacobianMode(fej);
   VelConstraintModel model;
 
   Llh llh = EcefToLlh(state.p);
@@ -136,7 +162,7 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
 
   Matrix3d H_v = Matrix3d::Zero();
   Matrix3d H_theta = Matrix3d::Zero();
-  if (use_true_iekf) {
+  if (vel_mode == VelJacobianMode::kTrueInEkf) {
     // phase-2: 直接在 true Lie-core 坐标 (rho_v^b, phi^b) 下线性化，
     // 不再先构造加法误差雅可比再做坐标变换。
     H_v = C_b_v;
@@ -144,7 +170,7 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   } else {
     // H_v = C_b^v * C_n^b
     H_v = C_b_v * C_bn.transpose();
-    if (use_hybrid_inekf) {
+    if (vel_mode == VelJacobianMode::kHybridZero) {
       // RI 坐标下速度类约束与姿态误差解耦
       H_theta.setZero();
     } else {
@@ -185,15 +211,19 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   // δ(C_n^b * omega_in^n) / δφ ≈ C_n^b * Skew(omega_in^n) 的贡献经杆臂传播
   // InEKF (Right-Invariant): 姿态误差列相对加法误差模型取反
   // 注：仅当 lever_arm.norm() > 0.05m 时该项才有显著影响
-  if (!use_hybrid_inekf && lever_arm.norm() > 1e-3) {
+  if (vel_mode != VelJacobianMode::kHybridZero && lever_arm.norm() > 1e-3) {
     Matrix3d H_theta_lever = Matrix3d::Zero();
-    if (use_true_iekf) {
+    if (vel_mode == VelJacobianMode::kTrueInEkf) {
       H_theta_lever = C_b_v * Skew(lever_arm) * Skew(omega_in_b);
     } else {
       H_theta_lever =
           -C_b_v * Skew(lever_arm) * C_bn.transpose() * Skew(omega_in_n);
     }
     model.H.block<2, 3>(0, StateIdx::kAtt) += H_theta_lever.block<2, 3>(1, 0);
+  }
+
+  if (runtime_true_iekf && vel_mode != VelJacobianMode::kTrueInEkf) {
+    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
   }
 
   model.R = Matrix2d::Zero();
@@ -211,9 +241,8 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
                                    const Vector3d &omega_ib_b_raw,
                                    double sigma_odo,
                                    const FejManager *fej) {
-  bool use_inekf = (fej != nullptr && fej->enabled);
-  bool use_true_iekf = UseTrueInEkf(fej);
-  bool use_hybrid_inekf = UseHybridInEkf(fej);
+  bool runtime_true_iekf = UseTrueInEkf(fej);
+  VelJacobianMode vel_mode = ResolveVelJacobianMode(fej);
   VelConstraintModel model;
 
   Llh llh = EcefToLlh(state.p);
@@ -248,7 +277,7 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
 
   // 1. H_v
   RowVector3d H_v_phys = RowVector3d::Zero();
-  if (use_true_iekf) {
+  if (vel_mode == VelJacobianMode::kTrueInEkf) {
     H_v_phys = C_b_v.row(0);
   } else {
     H_v_phys = (C_b_v * C_bn.transpose()).row(0);
@@ -256,11 +285,11 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   model.H.block<1, 3>(0, StateIdx::kVel) = s * H_v_phys;
 
   Matrix3d H_theta_full = Matrix3d::Zero();
-  if (use_true_iekf) {
+  if (vel_mode == VelJacobianMode::kTrueInEkf) {
     // phase-2: 直接在 true Lie-core 坐标 (rho_v^b, phi^b) 下线性化。
     H_theta_full = C_b_v * Skew(v_b);
   } else {
-    if (use_hybrid_inekf) {
+    if (vel_mode == VelJacobianMode::kHybridZero) {
       // RI 坐标下，速度类约束的姿态列解耦
       H_theta_full.setZero();
     } else {
@@ -268,8 +297,8 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
       H_theta_full = -C_b_v * Skew(v_b) * C_bn.transpose();
     }
   }
-  if (!use_hybrid_inekf && lever_arm.norm() > 1e-3) {
-    if (use_true_iekf) {
+  if (vel_mode != VelJacobianMode::kHybridZero && lever_arm.norm() > 1e-3) {
+    if (vel_mode == VelJacobianMode::kTrueInEkf) {
       H_theta_full += C_b_v * Skew(lever_arm) * Skew(omega_in_b);
     } else {
       H_theta_full +=
@@ -304,6 +333,10 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   // 6. H_lever = C_b^v * Skew(ω_nb^b)
   RowVector3d H_lever_phys = C_b_v.row(0) * Skew(omega_nb_b);
   model.H.block<1, 3>(0, StateIdx::kLever) = s * H_lever_phys;
+
+  if (runtime_true_iekf && vel_mode != VelJacobianMode::kTrueInEkf) {
+    TransformAdditiveCoreJacobianToTrueInEkf(model.H, C_bn);
+  }
 
   model.R.resize(1, 1);
   model.R(0, 0) = sigma_odo * sigma_odo;

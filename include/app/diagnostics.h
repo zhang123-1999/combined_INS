@@ -39,7 +39,7 @@ class DiagnosticsEngine {
    * 执行量测更新并记录诊断日志。
    * 替换原来的 if(diag){Correct+log} else {Correct} 模式。
    */
-  void Correct(EskfEngine &engine, const std::string &tag, double t,
+  bool Correct(EskfEngine &engine, const std::string &tag, double t,
                const Eigen::VectorXd &y, const Eigen::MatrixXd &H,
                const Eigen::MatrixXd &R,
                const StateMask *update_mask = nullptr);

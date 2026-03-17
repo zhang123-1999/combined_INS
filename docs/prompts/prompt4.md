@@ -29,7 +29,7 @@
 ### 1.3 初始化（Init）
 - 是否使用真值首点初始化（`use_truth_pva`）
 - 初始偏置 `ba0/bg0`
-- 初始协方差 `P0_diag`（长度必须为 15）
+- 初始协方差 `P0_diag`（长度必须为 31；若显式提供，则应优先于 `std_*`）
 -（可选）静止对准窗口长度（若你有“前N秒对准”策略）
 
 ### 1.4 噪声参数（Noise）
@@ -81,7 +81,10 @@ fusion:
     use_truth_pva: true
     ba0: [0, 0, 0]
     bg0: [0, 0, 0]
-    P0_diag: [0.1,0.1,0.1, 0.1,0.1,0.1, 0.01,0.01,0.01, 0.01,0.01,0.01, 0.01,0.01,0.01]
+    P0_diag: [0.1,0.1,0.1, 0.1,0.1,0.1, 0.01,0.01,0.01,
+              1e-6,1e-6,1e-6, 1e-6,1e-6,1e-6,
+              2.5e-7,2.5e-7,2.5e-7, 2.5e-7,2.5e-7,2.5e-7,
+              2.5e-5, 1.0e-4,0.09,0.01, 0.01,0.01,0.01, 0.01,0.01,0.01]
 
 generator:
   pos_path: POS.txt
@@ -105,7 +108,7 @@ generator:
 
 * `struct AnchorsConfig { std::string mode; double margin; std::vector<Eigen::Vector3d> positions; };`
 * `struct GatingConfig { double uwb_residual_max; double time_tolerance; };`
-* `struct InitConfig { bool use_truth_pva; Eigen::Vector3d ba0, bg0; Eigen::Matrix<double,15,1> P0_diag; };`
+* `struct InitConfig { bool use_truth_pva; Eigen::Vector3d ba0, bg0; Eigen::Matrix<double,31,1> P0_diag; };`
 
 将它们作为字段加入：
 
@@ -134,7 +137,7 @@ generator:
 * UWB 残差门控：`3.0` → `options.gating.uwb_residual_max`
 * auto anchors margin：`1.0` → `options.anchors.margin`
 * seed/uwb_hz/sigma：从 generator options 读取
-* `P0.diagonal() << ...`：从 `options.init.P0_diag` 赋值
+* `P0.diagonal() << ...`：若显式给出 `options.init.P0_diag`，则以其为准；否则从 `std_*` 构建
 
 ### 3.4 anchors 逻辑统一
 
@@ -146,7 +149,7 @@ generator:
 
 * anchors.positions 必须为 4 个元素（当前系统假设 4 基站；如你希望可扩展，则让数量可变，但要同步更新 UWB 观测处理）
 * 每个 position 必须有 3 个数
-* `P0_diag.size()==15`
+* `P0_diag.size()==31`
 * mode 只能为 fixed/auto
 * gating/time_tolerance > 0，sigma>0 等范围检查
 

@@ -23,6 +23,27 @@ constexpr int kP0Size = kStateDim;
   throw invalid_argument(message);
 }
 
+string ParseEnumString(const YAML::Node &node, const string &field,
+                       const vector<string> &allowed) {
+  if (!node || !node.IsScalar()) {
+    ThrowConfigError("error: " + field + " 必须为字符串");
+  }
+  string value = node.as<string>();
+  for (const auto &item : allowed) {
+    if (value == item) {
+      return value;
+    }
+  }
+  string msg = "error: " + field + " 只能为 ";
+  for (size_t i = 0; i < allowed.size(); ++i) {
+    if (i > 0) {
+      msg += (i + 1 == allowed.size()) ? " 或 " : " / ";
+    }
+    msg += allowed[i];
+  }
+  ThrowConfigError(msg);
+}
+
 /**
  * 解析长度为 3 的向量字段。
  * @param node YAML 节点
@@ -37,11 +58,31 @@ Vector3d ParseVector3(const YAML::Node &node, const string &field) {
                   node[2].as<double>());
 }
 
+bool IsVectorNoiseSentinel(const Vector3d &value) {
+  return (value.array() < 0.0).all();
+}
+
+bool IsVectorNoiseNonNegative(const Vector3d &value) {
+  return (value.array() >= 0.0).all();
+}
+
+void ValidateOptionalVectorNoise(const Vector3d &value, const string &field,
+                                 const string &context) {
+  if (!value.allFinite()) {
+    ThrowConfigError("error: " + context + "." + field + " 必须为有限数值");
+  }
+  if (IsVectorNoiseSentinel(value) || IsVectorNoiseNonNegative(value)) {
+    return;
+  }
+  ThrowConfigError("error: " + context + "." + field +
+                   " 必须三轴全为非负，或三轴全为负数以表示回退到标量字段");
+}
+
 /**
- * 解析长度为 16 的向量字段（P0 对角线）。
+ * 解析长度为状态维数的向量字段（P0 对角线）。
  * @param node YAML 节点
  * @param field 字段名（用于报错提示）
- * @return 16x1 向量
+ * @return 状态维数 x 1 向量
  */
 Matrix<double, kP0Size, 1> ParseVectorStateDim(const YAML::Node &node,
                                     const string &field) {
@@ -475,6 +516,16 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["enable_consistency_log"]) {
     out.enable_consistency_log = node["enable_consistency_log"].as<bool>();
   }
+  if (node["enable_mechanism_log"]) {
+    out.enable_mechanism_log = node["enable_mechanism_log"].as<bool>();
+  }
+  if (node["mechanism_log_stride"]) {
+    out.mechanism_log_stride = node["mechanism_log_stride"].as<int>();
+  }
+  if (node["mechanism_log_post_gnss_only"]) {
+    out.mechanism_log_post_gnss_only =
+        node["mechanism_log_post_gnss_only"].as<bool>();
+  }
   if (node["diag_gravity_min_duration"]) {
     out.diag_gravity_min_duration =
         node["diag_gravity_min_duration"].as<double>();
@@ -508,6 +559,9 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["diag_first_divergence_speed"]) {
     out.diag_first_divergence_speed =
         node["diag_first_divergence_speed"].as<double>();
+  }
+  if (out.mechanism_log_stride <= 0) {
+    ThrowConfigError("error: " + context + ".constraints.mechanism_log_stride 必须为正整数");
   }
   return out;
 }
@@ -556,6 +610,24 @@ FejConfig ApplyFejNode(const FejConfig &base, const YAML::Node &node,
   if (node["ri_inject_pos_inverse"]) {
     out.ri_inject_pos_inverse = node["ri_inject_pos_inverse"].as<bool>();
   }
+  if (node["debug_force_process_model"]) {
+    out.debug_force_process_model = ParseEnumString(
+        node["debug_force_process_model"], context + ".fej.debug_force_process_model",
+        {"auto", "eskf", "true_iekf"});
+  }
+  if (node["debug_force_vel_jacobian"]) {
+    out.debug_force_vel_jacobian = ParseEnumString(
+        node["debug_force_vel_jacobian"], context + ".fej.debug_force_vel_jacobian",
+        {"auto", "eskf", "true_iekf", "hybrid_zero"});
+  }
+  if (node["debug_disable_true_reset_gamma"]) {
+    out.debug_disable_true_reset_gamma =
+        node["debug_disable_true_reset_gamma"].as<bool>();
+  }
+  if (node["debug_enable_standard_reset_gamma"]) {
+    out.debug_enable_standard_reset_gamma =
+        node["debug_enable_standard_reset_gamma"].as<bool>();
+  }
   return out;
 }
 
@@ -575,6 +647,9 @@ StateAblationConfig ApplyAblationNode(const StateAblationConfig &base,
   if (node["disable_gnss_lever_arm"]) {
     out.disable_gnss_lever_arm = node["disable_gnss_lever_arm"].as<bool>();
   }
+  if (node["disable_gnss_lever_z"]) {
+    out.disable_gnss_lever_z = node["disable_gnss_lever_z"].as<bool>();
+  }
   if (node["disable_odo_lever_arm"]) {
     out.disable_odo_lever_arm = node["disable_odo_lever_arm"].as<bool>();
   }
@@ -592,6 +667,9 @@ StateAblationConfig ApplyAblationNode(const StateAblationConfig &base,
   }
   if (node["disable_mounting"]) {
     out.disable_mounting = node["disable_mounting"].as<bool>();
+  }
+  if (node["disable_mounting_roll"]) {
+    out.disable_mounting_roll = node["disable_mounting_roll"].as<bool>();
   }
   return out;
 }
@@ -744,6 +822,14 @@ void ValidateInitConfig(const InitConfig &config, const string &context) {
     ThrowConfigError("error: " + context +
                      ".init.lever_arm_source 仅支持 constraints/init");
   }
+  if (config.has_custom_P0_diag) {
+    for (int i = 0; i < kP0Size; ++i) {
+      if (!std::isfinite(config.P0_diag(i)) || config.P0_diag(i) < 0.0) {
+        ThrowConfigError("error: " + context +
+                         ".init.P0_diag 必须为非负有限数值");
+      }
+    }
+  }
 }
 
 /**
@@ -858,6 +944,7 @@ InitConfig ApplyInitNode(const InitConfig &base, const YAML::Node &node,
 
   if (node["P0_diag"]) {
     out.P0_diag = ParseVectorStateDim(node["P0_diag"], context + ".init.P0_diag");
+    out.has_custom_P0_diag = true;
   }
   return out;
 }
@@ -890,8 +977,16 @@ NoiseParams ApplyNoiseNode(const NoiseParams &base, const YAML::Node &node,
   if (node["sigma_ba"]) {
     out.sigma_ba = node["sigma_ba"].as<double>();
   }
+  if (node["sigma_ba_vec"]) {
+    out.sigma_ba_vec =
+        ParseVector3(node["sigma_ba_vec"], context + ".noise.sigma_ba_vec");
+  }
   if (node["sigma_bg"]) {
     out.sigma_bg = node["sigma_bg"].as<double>();
+  }
+  if (node["sigma_bg_vec"]) {
+    out.sigma_bg_vec =
+        ParseVector3(node["sigma_bg_vec"], context + ".noise.sigma_bg_vec");
   }
   if (node["sigma_odo_scale"]) {
     out.sigma_odo_scale = node["sigma_odo_scale"].as<double>();
@@ -911,8 +1006,16 @@ NoiseParams ApplyNoiseNode(const NoiseParams &base, const YAML::Node &node,
   if (node["sigma_sg"]) {
     out.sigma_sg = node["sigma_sg"].as<double>();
   }
+  if (node["sigma_sg_vec"]) {
+    out.sigma_sg_vec =
+        ParseVector3(node["sigma_sg_vec"], context + ".noise.sigma_sg_vec");
+  }
   if (node["sigma_sa"]) {
     out.sigma_sa = node["sigma_sa"].as<double>();
+  }
+  if (node["sigma_sa_vec"]) {
+    out.sigma_sa_vec =
+        ParseVector3(node["sigma_sa_vec"], context + ".noise.sigma_sa_vec");
   }
   if (node["markov_corr_time"]) {
     out.markov_corr_time = node["markov_corr_time"].as<double>();
@@ -920,8 +1023,17 @@ NoiseParams ApplyNoiseNode(const NoiseParams &base, const YAML::Node &node,
   if (node["sigma_lever_arm"]) {
     out.sigma_lever_arm = node["sigma_lever_arm"].as<double>();
   }
+  if (node["sigma_lever_arm_vec"]) {
+    out.sigma_lever_arm_vec = ParseVector3(
+        node["sigma_lever_arm_vec"], context + ".noise.sigma_lever_arm_vec");
+  }
   if (node["sigma_gnss_lever_arm"]) {
     out.sigma_gnss_lever_arm = node["sigma_gnss_lever_arm"].as<double>();
+  }
+  if (node["sigma_gnss_lever_arm_vec"]) {
+    out.sigma_gnss_lever_arm_vec =
+        ParseVector3(node["sigma_gnss_lever_arm_vec"],
+                     context + ".noise.sigma_gnss_lever_arm_vec");
   }
   if (node["sigma_gnss_pos"]) {
     out.sigma_gnss_pos = node["sigma_gnss_pos"].as<double>();
@@ -936,10 +1048,27 @@ NoiseParams ApplyNoiseNode(const NoiseParams &base, const YAML::Node &node,
  */
 void ValidateNoiseParams(const NoiseParams &noise, const string &context) {
   if (noise.sigma_acc <= 0.0 || noise.sigma_gyro <= 0.0 ||
-      noise.sigma_ba <= 0.0 || noise.sigma_bg <= 0.0 ||
       noise.sigma_uwb <= 0.0 || noise.sigma_odo_scale <= 0.0) {
     ThrowConfigError("error: " + context +
-                     ".noise sigma_* 必须全部为正");
+                     ".noise sigma_acc/sigma_gyro/sigma_uwb/sigma_odo_scale 必须为正");
+  }
+  if (noise.sigma_ba <= 0.0 && !IsVectorNoiseNonNegative(noise.sigma_ba_vec)) {
+    ThrowConfigError("error: " + context +
+                     ".noise sigma_ba 必须为正，或通过 sigma_ba_vec 显式提供逐轴非负值");
+  }
+  if (noise.sigma_bg <= 0.0 && !IsVectorNoiseNonNegative(noise.sigma_bg_vec)) {
+    ThrowConfigError("error: " + context +
+                     ".noise sigma_bg 必须为正，或通过 sigma_bg_vec 显式提供逐轴非负值");
+  }
+  if (!std::isfinite(noise.sigma_sg) || noise.sigma_sg < 0.0 ||
+      !std::isfinite(noise.sigma_sa) || noise.sigma_sa < 0.0 ||
+      !std::isfinite(noise.sigma_lever_arm) || noise.sigma_lever_arm < 0.0 ||
+      !std::isfinite(noise.sigma_gnss_lever_arm) ||
+      noise.sigma_gnss_lever_arm < 0.0 ||
+      !std::isfinite(noise.sigma_mounting) || noise.sigma_mounting < 0.0 ||
+      !std::isfinite(noise.markov_corr_time) || noise.markov_corr_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".noise 的 sigma_sg/sigma_sa/sigma_lever_arm/sigma_gnss_lever_arm/sigma_mounting/markov_corr_time 必须为非负有限数值");
   }
   // sigma_mounting 允许为 0（随机常数模型，无过程噪声）
   auto valid_optional_mounting = [](double v) {
@@ -951,6 +1080,14 @@ void ValidateNoiseParams(const NoiseParams &noise, const string &context) {
     ThrowConfigError("error: " + context +
                      ".noise sigma_mounting_roll/sigma_mounting_pitch/sigma_mounting_yaw 必须为非负，或 -1 表示回退");
   }
+  ValidateOptionalVectorNoise(noise.sigma_ba_vec, "noise.sigma_ba_vec", context);
+  ValidateOptionalVectorNoise(noise.sigma_bg_vec, "noise.sigma_bg_vec", context);
+  ValidateOptionalVectorNoise(noise.sigma_sg_vec, "noise.sigma_sg_vec", context);
+  ValidateOptionalVectorNoise(noise.sigma_sa_vec, "noise.sigma_sa_vec", context);
+  ValidateOptionalVectorNoise(noise.sigma_lever_arm_vec,
+                              "noise.sigma_lever_arm_vec", context);
+  ValidateOptionalVectorNoise(noise.sigma_gnss_lever_arm_vec,
+                              "noise.sigma_gnss_lever_arm_vec", context);
 }
 
 /**
@@ -998,14 +1135,12 @@ FusionOptions LoadFusionOptions(const string &path) {
   YAML::Node root;
   try {
     root = YAML::LoadFile(path);
-  } catch (const exception &) {
-    cout << "error: 无法读取配置文件 " << path << "\n";
-    return FusionOptions();
+  } catch (const exception &e) {
+    ThrowConfigError("error: 无法读取配置文件 " + path + " (" + e.what() + ")");
   }
 
   if (!root["fusion"]) {
-    cout << "error: 配置文件中缺少 fusion 节点\n";
-    return FusionOptions();
+    ThrowConfigError("error: 配置文件中缺少 fusion 节点: " + path);
   }
 
   FusionOptions opt;
@@ -1022,6 +1157,9 @@ FusionOptions LoadFusionOptions(const string &path) {
                                  : opt.enable_gnss_velocity;
   opt.output_path =
       f["output_path"] ? f["output_path"].as<string>() : opt.output_path;
+  opt.state_series_output_path = f["state_series_output_path"]
+                                     ? f["state_series_output_path"].as<string>()
+                                     : opt.state_series_output_path;
   opt.start_time = f["starttime"] ? f["starttime"].as<double>() : opt.start_time;
   opt.final_time = f["finaltime"] ? f["finaltime"].as<double>() : opt.final_time;
 
@@ -1062,14 +1200,12 @@ GeneratorOptions LoadGeneratorOptions(const string &path) {
   YAML::Node root;
   try {
     root = YAML::LoadFile(path);
-  } catch (const exception &) {
-    cout << "error: 无法读取配置文件 " << path << "\n";
-    return GeneratorOptions();
+  } catch (const exception &e) {
+    ThrowConfigError("error: 无法读取配置文件 " + path + " (" + e.what() + ")");
   }
 
   if (!root["generator"]) {
-    cout << "error: 配置文件中缺少 generator 节点\n";
-    return GeneratorOptions();
+    ThrowConfigError("error: 配置文件中缺少 generator 节点: " + path);
   }
 
   GeneratorOptions opt;

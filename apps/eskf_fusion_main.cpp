@@ -42,9 +42,15 @@ int main(int argc, char **argv) {
     FusionResult result = RunFusion(options, dataset, x0, P0);
     EvaluationSummary summary = EvaluateFusion(result, dataset);
     SaveFusionResult(options.output_path, summary);
+    if (!options.state_series_output_path.empty()) {
+      SaveStateSeries(options.state_series_output_path, result, options);
+    }
 
     cout << "RMSE (融合) [m]: " << summary.rmse_fused.transpose() << "\n";
     cout << "结果已保存到: " << options.output_path << "\n";
+    if (!options.state_series_output_path.empty()) {
+      cout << "状态序列已保存到: " << options.state_series_output_path << "\n";
+    }
   } catch (const exception &e) {
     cerr << "运行失败: " << e.what() << "\n";
     return 1;

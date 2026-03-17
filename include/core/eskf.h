@@ -55,6 +55,13 @@ struct InEkfConfig {
   int ri_vel_gyro_noise_mode = -1;
   // RI 注入逆变换中，是否对位置执行 dr -= Skew(p_local) * dphi。
   bool ri_inject_pos_inverse = true;
+  // Debug-only attribution switches. Accepted values:
+  // - process: auto | eskf | true_iekf
+  // - vel jacobian: auto | eskf | true_iekf | hybrid_zero
+  string debug_force_process_model = "auto";
+  string debug_force_vel_jacobian = "auto";
+  bool debug_disable_true_reset_gamma = false;
+  bool debug_enable_standard_reset_gamma = false;
 
   void Enable(bool flag) { enabled = flag; }
   bool IsEnabled() const { return enabled; }
@@ -75,6 +82,11 @@ struct NoiseParams {
   double sigma_bg = 0.0;   // rad/s/√Hz
   double sigma_sg = 0.0;   // 1/√Hz（陀螺比例因子过程噪声）
   double sigma_sa = 0.0;   // 1/√Hz（加速度计比例因子过程噪声）
+  // 逐轴过程噪声；各元素 >= 0 时优先于对应标量字段，否则回退到标量字段
+  Vector3d sigma_ba_vec = Vector3d::Constant(-1.0);
+  Vector3d sigma_bg_vec = Vector3d::Constant(-1.0);
+  Vector3d sigma_sg_vec = Vector3d::Constant(-1.0);
+  Vector3d sigma_sa_vec = Vector3d::Constant(-1.0);
   double sigma_odo_scale = 0.0; // 1/√Hz
   double sigma_mounting = 0.0;  // rad/√Hz（安装角过程噪声，可设极小值）
   // 可选细分过程噪声；<0 表示回退到 sigma_mounting
@@ -83,6 +95,8 @@ struct NoiseParams {
   double sigma_mounting_yaw = -1.0;    // rad/√Hz
   double sigma_lever_arm = 0.0; // m/√Hz（杆臂过程噪声）
   double sigma_gnss_lever_arm = 0.0; // m/√Hz（GNSS杆臂过程噪声）
+  Vector3d sigma_lever_arm_vec = Vector3d::Constant(-1.0);
+  Vector3d sigma_gnss_lever_arm_vec = Vector3d::Constant(-1.0);
   double sigma_uwb = 0.0;     // m
   double sigma_gnss_pos = 0.0; // m（GNSS位置量测噪声）
   // 一阶高斯马尔可夫相关时间（秒），适用于 ba/bg/sg/sa
@@ -157,6 +171,20 @@ struct TrueInEkfCorrectionSnapshot {
       Matrix<double, kStateDim, kStateDim>::Zero();
   Matrix<double, kStateDim, 1> dx = Matrix<double, kStateDim, 1>::Zero();
   bool covariance_floor_applied = false;
+};
+
+struct CorrectionDebugSnapshot {
+  bool valid = false;
+  bool used_true_iekf = false;
+  double t_state = 0.0;
+  Matrix<double, kStateDim, kStateDim> P_prior =
+      Matrix<double, kStateDim, kStateDim>::Zero();
+  VectorXd y;
+  MatrixXd H;
+  MatrixXd R;
+  MatrixXd S;
+  MatrixXd K;
+  Matrix<double, kStateDim, 1> dx = Matrix<double, kStateDim, 1>::Zero();
 };
 
 /**
@@ -282,6 +310,9 @@ class EskfEngine {
   const TrueInEkfCorrectionSnapshot &last_true_iekf_correction() const {
     return last_true_iekf_correction_;
   }
+  const CorrectionDebugSnapshot &last_correction_debug() const {
+    return last_correction_debug_;
+  }
   /**
    * 获取当前 IMU 时间戳。
    */
@@ -316,12 +347,15 @@ class EskfEngine {
   void UpdateCovarianceJoseph(const MatrixXd &K, const MatrixXd &H,
                               const MatrixXd &R);
   void ApplyTrueInEkfReset(const VectorXd &dx);
+  void ApplyStandardEskfReset(const VectorXd &dx);
   bool IsStateEnabledByMasks(int idx, const StateMask *update_mask) const;
   void ApplyStateMaskToDx(VectorXd &dx, const StateMask *update_mask) const;
   void ApplyUpdateMaskToKalmanGain(MatrixXd &K, const StateMask *update_mask) const;
   void ApplyStateMaskToCov();
   void ApplyCovarianceFloor();
   Matrix<double, kStateDim, kStateDim> BuildTrueInEkfResetGamma(
+      const VectorXd &dx) const;
+  Matrix<double, kStateDim, kStateDim> BuildStandardEskfResetGamma(
       const VectorXd &dx) const;
 
   NoiseParams noise_;
@@ -337,4 +371,5 @@ class EskfEngine {
   CorrectionGuard correction_guard_{};
   CovarianceFloor covariance_floor_{};
   TrueInEkfCorrectionSnapshot last_true_iekf_correction_{};
+  CorrectionDebugSnapshot last_correction_debug_{};
 };

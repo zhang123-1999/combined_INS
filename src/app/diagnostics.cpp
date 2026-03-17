@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +17,7 @@
 
 using namespace std;
 using namespace Eigen;
+namespace fs = std::filesystem;
 
 // ============================================================
 // 内部辅助结构体与函数
@@ -115,6 +117,40 @@ bool ShouldLogMeasUpdate(MeasLogLimiter &lim, const string &tag) {
   return true;
 }
 
+double SafeQuadraticInfo(const MatrixXd &A, const VectorXd &h) {
+  if (A.rows() != A.cols() || A.rows() != h.size() || h.size() == 0) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  LDLT<MatrixXd> ldlt(A);
+  if (ldlt.info() != Success) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  VectorXd solved = ldlt.solve(h);
+  if (ldlt.info() != Success || !solved.allFinite()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return h.dot(solved);
+}
+
+double SafeTraceInfo(const MatrixXd &A, const MatrixXd &H) {
+  if (A.rows() != A.cols() || A.rows() != H.rows() || H.size() == 0) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  LDLT<MatrixXd> ldlt(A);
+  if (ldlt.info() != Success) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  MatrixXd solved = ldlt.solve(H);
+  if (ldlt.info() != Success || !solved.allFinite()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return (H.array() * solved.array()).sum();
+}
+
+double SafeNisFromInnovation(const MatrixXd &S, const VectorXd &y) {
+  return SafeQuadraticInfo(S, y);
+}
+
 // ---------- 状态日志条目 ----------
 struct StateDiagLog {
   double t, dt;
@@ -199,6 +235,15 @@ struct DiagnosticsEngine::Impl {
   double last_diag_t = -1e9;
   static constexpr double kDiagInterval = 1.0;
 
+  // 机理归因日志
+  ofstream mechanism_file;
+  bool mechanism_enabled = false;
+  size_t mechanism_stride = 1;
+  size_t mechanism_seen_nhc = 0;
+  size_t mechanism_seen_odo = 0;
+  double gnss_split_t = numeric_limits<double>::infinity();
+  double gnss_tol = 0.0;
+
   // NHC 跳过警告
   bool nhc_skip_warned = false;
 
@@ -245,6 +290,19 @@ struct DiagnosticsEngine::Impl {
       LogStateWindow(e, label);
     }
   }
+
+  bool ShouldLogMechanism(const string &tag) {
+    size_t *seen = nullptr;
+    if (TagMatches(tag, "NHC")) {
+      seen = &mechanism_seen_nhc;
+    } else if (TagMatches(tag, "ODO")) {
+      seen = &mechanism_seen_odo;
+    } else {
+      return false;
+    }
+    ++(*seen);
+    return mechanism_stride <= 1 || (((*seen) - 1) % mechanism_stride) == 0;
+  }
 };
 
 // ============================================================
@@ -281,8 +339,22 @@ void DiagnosticsEngine::set_nhc_skip_warned(bool v) { impl_->nhc_skip_warned = v
 void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &options) {
   if (!impl_->enabled) return;
 
+  impl_->mechanism_enabled = impl_->config.enable_mechanism_log;
+  impl_->mechanism_stride = static_cast<size_t>(max(1, impl_->config.mechanism_log_stride));
+  impl_->gnss_tol = options.gating.time_tolerance;
+  if (options.gnss_schedule.enabled && !dataset.imu.empty() &&
+      dataset.imu.back().t > dataset.imu.front().t) {
+    double t0_nav = dataset.imu.front().t;
+    double t1_nav = dataset.imu.back().t;
+    impl_->gnss_split_t =
+        t0_nav + options.gnss_schedule.head_ratio * (t1_nav - t0_nav);
+  } else {
+    impl_->gnss_split_t = numeric_limits<double>::infinity();
+  }
+
   // 离线真值重力检查
-  if (!dataset.imu.empty() && dataset.truth.timestamps.size() > 0) {
+  if (impl_->config.enable_diagnostics &&
+      !dataset.imu.empty() && dataset.truth.timestamps.size() > 0) {
     const auto &imu = dataset.imu;
     const auto &t_truth = dataset.truth.timestamps;
     const auto &pos_truth = dataset.truth.positions;
@@ -331,7 +403,9 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
   }
 
   // 打开 DIAG.txt 并写表头
-  impl_->diag_file.open("DIAG.txt");
+  if (impl_->config.enable_diagnostics) {
+    impl_->diag_file.open("DIAG.txt");
+  }
   if (impl_->diag_file.is_open()) {
     impl_->diag_file << fixed << setprecision(8);
     impl_->diag_file << "t";
@@ -346,57 +420,129 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
                      << " corr_baz_phiN corr_baz_phiE corr_mp_phiE corr_my_phiD corr_odo_bax";
     impl_->diag_file << " v_fwd omega_z odo_speed\n";
   }
+
+  if (impl_->mechanism_enabled) {
+    fs::path sol_path(options.output_path);
+    fs::path mechanism_path =
+        sol_path.parent_path() / (sol_path.stem().string() + "_mechanism.csv");
+    if (!mechanism_path.parent_path().empty()) {
+      fs::create_directories(mechanism_path.parent_path());
+    }
+    impl_->mechanism_file.open(mechanism_path, ios::out | ios::trunc);
+    if (impl_->mechanism_file.is_open()) {
+      impl_->mechanism_file << fixed << setprecision(9);
+      impl_->mechanism_file
+          << "tag,t_meas,t_state,post_gnss,used_true_iekf,y_dim,y_norm,nis,s_trace,"
+          << "dx_att_z,dx_bg_z,dx_mount_yaw,"
+          << "k_row_att_z_norm,k_row_bg_z_norm,k_row_mount_yaw_norm,"
+          << "h_col_att_z_norm,h_col_bg_z_norm,h_col_mount_yaw_norm,"
+          << "h_block_att_norm,h_block_bg_norm,h_block_mount_norm,"
+          << "info_att_z,info_bg_z,info_mount_yaw,info_heading_trace,"
+          << "bg_z_before,bg_z_after,mount_yaw_before,mount_yaw_after\n";
+    }
+  }
 }
 
 // ---------- Correct ----------
-void DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
-                                 const VectorXd &y, const MatrixXd &H, const MatrixXd &R,
-                                 const StateMask *update_mask) {
+bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
+                                const VectorXd &y, const MatrixXd &H, const MatrixXd &R,
+                                const StateMask *update_mask) {
   if (!impl_->enabled) {
-    engine.Correct(y, H, R, nullptr, update_mask);
-    return;
+    return engine.Correct(y, H, R, nullptr, update_mask);
   }
 
   // 捕获修正前状态（用于 NHC 的 dv/dq 额外日志）
+  State state_before = engine.state();
   Vector3d v_before = engine.state().v;
   Vector4d q_before = engine.state().q;
 
   VectorXd dx;
-  engine.Correct(y, H, R, &dx, update_mask);
+  bool updated = engine.Correct(y, H, R, &dx, update_mask);
 
-  // 缓存日志
-  impl_->PushMeasLog(tag, t, y, dx);
-
-  // 漂移/发散窗口日志
   bool log_div = false, log_drift = false;
-  if (impl_->div_window_active) {
-    log_div = ShouldLogMeasUpdate(impl_->div_meas_limiter, tag);
-    if (log_div) LogMeasUpdate("Div " + tag, t, y, dx);
-  }
-  if (impl_->drift_window_active) {
-    log_drift = ShouldLogMeasUpdate(impl_->drift_meas_limiter, tag);
-    if (log_drift) LogMeasUpdate("Drift " + tag, t, y, dx);
+  if (impl_->config.enable_diagnostics) {
+    // 缓存日志
+    impl_->PushMeasLog(tag, t, y, dx);
+
+    // 漂移/发散窗口日志
+    if (impl_->div_window_active) {
+      log_div = ShouldLogMeasUpdate(impl_->div_meas_limiter, tag);
+      if (log_div) LogMeasUpdate("Div " + tag, t, y, dx);
+    }
+    if (impl_->drift_window_active) {
+      log_drift = ShouldLogMeasUpdate(impl_->drift_meas_limiter, tag);
+      if (log_drift) LogMeasUpdate("Drift " + tag, t, y, dx);
+    }
+
+    // NHC 特有的修正后 dv/dq 日志
+    if (updated && (log_div || log_drift) && tag == "NHC") {
+      Vector3d dv = engine.state().v - v_before;
+      double dq_deg = QuatDeltaAngleRad(q_before, engine.state().q) * kRadToDeg;
+      if (log_div) {
+        cout << "[Diag] Div NHC update t=" << t
+             << " dv=" << dv.transpose() << " dq_deg=" << dq_deg << "\n";
+      }
+      if (log_drift) {
+        cout << "[Diag] Drift NHC update t=" << t
+             << " dv=" << dv.transpose() << " dq_deg=" << dq_deg << "\n";
+      }
+    }
   }
 
-  // NHC 特有的修正后 dv/dq 日志
-  if ((log_div || log_drift) && tag == "NHC") {
-    Vector3d dv = engine.state().v - v_before;
-    double dq_deg = QuatDeltaAngleRad(q_before, engine.state().q) * kRadToDeg;
-    if (log_div) {
-      cout << "[Diag] Div NHC update t=" << t
-           << " dv=" << dv.transpose() << " dq_deg=" << dq_deg << "\n";
-    }
-    if (log_drift) {
-      cout << "[Diag] Drift NHC update t=" << t
-           << " dv=" << dv.transpose() << " dq_deg=" << dq_deg << "\n";
+  if (updated && impl_->mechanism_enabled && impl_->mechanism_file.is_open() &&
+      impl_->ShouldLogMechanism(tag)) {
+    bool post_gnss =
+        std::isfinite(impl_->gnss_split_t) && t > impl_->gnss_split_t + impl_->gnss_tol;
+    if (!impl_->config.mechanism_log_post_gnss_only || post_gnss) {
+      const auto &snap = engine.last_correction_debug();
+      if (snap.valid) {
+        const MatrixXd H_att = snap.H.block(0, StateIdx::kAtt, snap.H.rows(), 3);
+        const MatrixXd H_bg = snap.H.block(0, StateIdx::kBg, snap.H.rows(), 3);
+        const MatrixXd H_mount =
+            snap.H.block(0, StateIdx::kMountRoll, snap.H.rows(), 3);
+        const VectorXd h_att_z = snap.H.col(StateIdx::kAtt + 2);
+        const VectorXd h_bg_z = snap.H.col(StateIdx::kBg + 2);
+        const VectorXd h_mount_yaw = snap.H.col(StateIdx::kMountYaw);
+        MatrixXd H_heading(snap.H.rows(), 3);
+        H_heading.col(0) = h_att_z;
+        H_heading.col(1) = h_bg_z;
+        H_heading.col(2) = h_mount_yaw;
+        impl_->mechanism_file
+            << tag << "," << t << "," << snap.t_state << ","
+            << (post_gnss ? 1 : 0) << ","
+            << (snap.used_true_iekf ? 1 : 0) << ","
+            << snap.y.size() << "," << snap.y.norm() << ","
+            << SafeNisFromInnovation(snap.S, snap.y) << ","
+            << snap.S.trace() << ","
+            << snap.dx(StateIdx::kAtt + 2) << ","
+            << snap.dx(StateIdx::kBg + 2) << ","
+            << snap.dx(StateIdx::kMountYaw) << ","
+            << snap.K.row(StateIdx::kAtt + 2).norm() << ","
+            << snap.K.row(StateIdx::kBg + 2).norm() << ","
+            << snap.K.row(StateIdx::kMountYaw).norm() << ","
+            << h_att_z.norm() << ","
+            << h_bg_z.norm() << ","
+            << h_mount_yaw.norm() << ","
+            << H_att.norm() << ","
+            << H_bg.norm() << ","
+            << H_mount.norm() << ","
+            << SafeQuadraticInfo(snap.R, h_att_z) << ","
+            << SafeQuadraticInfo(snap.R, h_bg_z) << ","
+            << SafeQuadraticInfo(snap.R, h_mount_yaw) << ","
+            << SafeTraceInfo(snap.R, H_heading) << ","
+            << state_before.bg.z() << "," << engine.state().bg.z() << ","
+            << state_before.mounting_yaw << "," << engine.state().mounting_yaw
+            << "\n";
+      }
     }
   }
+  return updated;
 }
 
 // ---------- CheckGravityAlignment ----------
 void DiagnosticsEngine::CheckGravityAlignment(double t, double dt, const ImuData &imu,
                                                const State &state, const TruthData &truth) {
-  if (!impl_->enabled) return;
+  if (!impl_->enabled || !impl_->config.enable_diagnostics) return;
 
   bool is_static = DetectZuptImuOnly(imu, impl_->config);
 
@@ -502,7 +648,7 @@ void DiagnosticsEngine::CheckGravityAlignment(double t, double dt, const ImuData
 void DiagnosticsEngine::OnStepComplete(double t, double dt, const State &state,
                                         const ImuData &imu, bool is_static_zupt,
                                         const TruthData &truth) {
-  if (!impl_->enabled) return;
+  if (!impl_->enabled || !impl_->config.enable_diagnostics) return;
 
   bool is_static_imu = DetectZuptImuOnly(imu, impl_->config);
 
@@ -604,7 +750,11 @@ void DiagnosticsEngine::OnStepComplete(double t, double dt, const State &state,
 // ---------- WriteDiagLine ----------
 void DiagnosticsEngine::WriteDiagLine(double t, double dt, const EskfEngine &engine,
                                        const ImuData &imu, double last_odo_speed, double t0) {
-  if (!impl_->diag_file.is_open() || (t - impl_->last_diag_t) < Impl::kDiagInterval) return;
+  if (!impl_->enabled || !impl_->config.enable_diagnostics ||
+      !impl_->diag_file.is_open() ||
+      (t - impl_->last_diag_t) < Impl::kDiagInterval) {
+    return;
+  }
   impl_->last_diag_t = t;
 
   const auto &P = engine.cov();
@@ -634,7 +784,7 @@ void DiagnosticsEngine::WriteDiagLine(double t, double dt, const EskfEngine &eng
 
 // ---------- Finalize ----------
 void DiagnosticsEngine::Finalize(double end_t) {
-  if (!impl_->enabled) return;
+  if (!impl_->enabled || !impl_->config.enable_diagnostics) return;
 
   if (impl_->drift_active) {
     cout << "[Diag] Gravity drift end t=" << end_t

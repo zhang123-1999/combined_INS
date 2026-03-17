@@ -112,8 +112,13 @@ bool InitializeState(const FusionOptions &options, const vector<ImuData> &imu,
 
   P0 = Matrix<double, kStateDim, kStateDim>::Zero();
 
-  // 优先使用分开配置的 std 参数构建 P0
-  if (options.init.std_pos.norm() > 1e-9) {
+  // 若显式提供 P0_diag，则其优先于 std_* 字段，避免“配置已写但未生效”。
+  if (options.init.has_custom_P0_diag) {
+      for (int i = 0; i < kStateDim; ++i) {
+          P0(i, i) = options.init.P0_diag(i);
+      }
+      cout << "[Init] P0 source: custom P0_diag\n";
+  } else if (options.init.std_pos.norm() > 1e-9) {
       Vector3d var_pos = options.init.std_pos.array().square();
       Vector3d var_vel = options.init.std_vel.array().square();
       // 姿态 STD 单位是 degree，需转为 radian
@@ -146,11 +151,13 @@ bool InitializeState(const FusionOptions &options, const vector<ImuData> &imu,
       // GNSS天线杆臂 (28-30)：初值未知，需要足够大的初始方差
       Vector3d var_gnss_lever = options.init.std_gnss_lever_arm.array().square();
       P0.diagonal().segment<3>(StateIdx::kGnssLever) = var_gnss_lever;  // [修复] gnss_lever_arm 从 28 开始
+      cout << "[Init] P0 source: std_* fields\n";
   } else {
-      // Manually assign to avoid Eigen static assertion issues with const params
+      // 兼容旧逻辑：若 std_* 被显式清零，则回退到默认 P0_diag。
       for(int i = 0; i < kStateDim; ++i) {
           P0(i, i) = options.init.P0_diag(i);
       }
+      cout << "[Init] P0 source: fallback default P0_diag\n";
   }
 
 

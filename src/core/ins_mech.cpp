@@ -53,6 +53,13 @@ double LocalGravityLocal(double lat, double h) {
   double g0 = gamma_a * (1.0 + 0.0052790414 * sin2_lat + 0.0000232718 * sin4_lat);
   return g0 - (3.0877e-6 - 4.3e-9 * sin2_lat) * h + 0.72e-12 * h * h;
 }
+
+Vector3d ResolveVectorNoise(const Vector3d &vec, double scalar) {
+  if ((vec.array() >= 0.0).all()) {
+    return vec;
+  }
+  return Vector3d::Constant(scalar);
+}
 }  // namespace
 
 /**
@@ -153,6 +160,13 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
                                 const FejManager *fej) {
   bool use_inekf = (fej != nullptr && fej->enabled);
   bool use_true_iekf = (fej != nullptr && fej->UseTrueInEkfMode());
+  if (fej != nullptr) {
+    if (fej->debug_force_process_model == "eskf") {
+      use_true_iekf = false;
+    } else if (fej->debug_force_process_model == "true_iekf") {
+      use_true_iekf = true;
+    }
+  }
   bool use_hybrid_inekf = use_inekf && !use_true_iekf;
 
   // 防御性检查：sigma 置零合法，但不允许 NaN/Inf。
@@ -162,6 +176,12 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   assert(std::isfinite(np.sigma_mounting));
   assert(std::isfinite(np.sigma_lever_arm));
   assert(std::isfinite(np.sigma_gnss_lever_arm));
+  assert(np.sigma_ba_vec.allFinite());
+  assert(np.sigma_bg_vec.allFinite());
+  assert(np.sigma_sg_vec.allFinite());
+  assert(np.sigma_sa_vec.allFinite());
+  assert(np.sigma_lever_arm_vec.allFinite());
+  assert(np.sigma_gnss_lever_arm_vec.allFinite());
 
   // 检查输入参数有效性
   if (std::abs(lat) > 1.57079632679 + 0.1) {
@@ -349,18 +369,26 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   // 马尔可夫模型: sigma 为不稳定性（稳态标准差），驱动噪声 σ_w = σ_ss * √(2/T)
   // 随机游走: sigma 直接作为驱动噪声密度
   // 注：sigma 在消融模式下可置零，对应 Qd 分量为零；此路径无除零风险。
-  double ba_w, bg_w, sg_w, sa_w;
+  Vector3d ba_sigma = ResolveVectorNoise(np.sigma_ba_vec, np.sigma_ba);
+  Vector3d bg_sigma = ResolveVectorNoise(np.sigma_bg_vec, np.sigma_bg);
+  Vector3d sg_sigma = ResolveVectorNoise(np.sigma_sg_vec, np.sigma_sg);
+  Vector3d sa_sigma = ResolveVectorNoise(np.sigma_sa_vec, np.sigma_sa);
+  Vector3d lever_sigma =
+      ResolveVectorNoise(np.sigma_lever_arm_vec, np.sigma_lever_arm);
+  Vector3d gnss_lever_sigma = ResolveVectorNoise(
+      np.sigma_gnss_lever_arm_vec, np.sigma_gnss_lever_arm);
+  Vector3d ba_w, bg_w, sg_w, sa_w;
   if (T > 0.0) {
     double scale = sqrt(2.0 / T);
-    ba_w = np.sigma_ba * scale;
-    bg_w = np.sigma_bg * scale;
-    sg_w = np.sigma_sg * scale;
-    sa_w = np.sigma_sa * scale;
+    ba_w = ba_sigma * scale;
+    bg_w = bg_sigma * scale;
+    sg_w = sg_sigma * scale;
+    sa_w = sa_sigma * scale;
   } else {
-    ba_w = np.sigma_ba;
-    bg_w = np.sigma_bg;
-    sg_w = np.sigma_sg;
-    sa_w = np.sigma_sa;
+    ba_w = ba_sigma;
+    bg_w = bg_sigma;
+    sg_w = sg_sigma;
+    sa_w = sa_sigma;
   }
 
   Matrix<double, kNoiseDim, kNoiseDim> Qc = Matrix<double, kNoiseDim, kNoiseDim>::Zero();
@@ -374,20 +402,20 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   double sg2 = np.sigma_gyro * np.sigma_gyro;   // gyro white noise
   Qc.diagonal() << sa2, sa2, sa2,                // acc white noise (0-2)
       sg2, sg2, sg2,                              // gyro white noise (3-5)
-      ba_w*ba_w, ba_w*ba_w, ba_w*ba_w,           // ba driving noise (6-8)
-      bg_w*bg_w, bg_w*bg_w, bg_w*bg_w,           // bg driving noise (9-11)
-      sg_w*sg_w, sg_w*sg_w, sg_w*sg_w,           // sg driving noise (12-14)
-      sa_w*sa_w, sa_w*sa_w, sa_w*sa_w,           // sa driving noise (15-17)
+      ba_w.x()*ba_w.x(), ba_w.y()*ba_w.y(), ba_w.z()*ba_w.z(),  // ba driving noise (6-8)
+      bg_w.x()*bg_w.x(), bg_w.y()*bg_w.y(), bg_w.z()*bg_w.z(),  // bg driving noise (9-11)
+      sg_w.x()*sg_w.x(), sg_w.y()*sg_w.y(), sg_w.z()*sg_w.z(),  // sg driving noise (12-14)
+      sa_w.x()*sa_w.x(), sa_w.y()*sa_w.y(), sa_w.z()*sa_w.z(),  // sa driving noise (15-17)
       np.sigma_odo_scale * np.sigma_odo_scale,   // odo_scale (18)
       sigma_mounting_roll * sigma_mounting_roll,       // mounting_roll (19)
       sigma_mounting_pitch * sigma_mounting_pitch,     // mounting_pitch (20)
       sigma_mounting_yaw * sigma_mounting_yaw,         // mounting_yaw (21)
-      np.sigma_lever_arm * np.sigma_lever_arm,   // lever_arm x (22)
-      np.sigma_lever_arm * np.sigma_lever_arm,   // lever_arm y (23)
-      np.sigma_lever_arm * np.sigma_lever_arm,   // lever_arm z (24)
-      np.sigma_gnss_lever_arm * np.sigma_gnss_lever_arm,   // gnss_lever_arm x (25)
-      np.sigma_gnss_lever_arm * np.sigma_gnss_lever_arm,   // gnss_lever_arm y (26)
-      np.sigma_gnss_lever_arm * np.sigma_gnss_lever_arm;   // gnss_lever_arm z (27)
+      lever_sigma.x() * lever_sigma.x(),         // lever_arm x (22)
+      lever_sigma.y() * lever_sigma.y(),         // lever_arm y (23)
+      lever_sigma.z() * lever_sigma.z(),         // lever_arm z (24)
+      gnss_lever_sigma.x() * gnss_lever_sigma.x(),   // gnss_lever_arm x (25)
+      gnss_lever_sigma.y() * gnss_lever_sigma.y(),   // gnss_lever_arm y (26)
+      gnss_lever_sigma.z() * gnss_lever_sigma.z();   // gnss_lever_arm z (27)
 
   // 梯形近似离散噪声（与文档式(569)一致的简化实现）：
   // Qd ≈ 0.5 * [Phi * (GQcG^T) * Phi^T + (GQcG^T)] * dt

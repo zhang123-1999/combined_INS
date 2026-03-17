@@ -117,6 +117,10 @@ struct ConstraintConfig {
   double max_lever_arm_step = 0.05;
   // 一致性摘要日志
   bool enable_consistency_log = true;
+  // 机理归因日志：为 ODO/NHC 的每次成功更新记录 heading 相关信息量与修正量。
+  bool enable_mechanism_log = false;
+  int mechanism_log_stride = 1;
+  bool mechanism_log_post_gnss_only = true;
   double diag_gravity_min_duration = 0.5;
   int diag_meas_log_buffer = 200;
   int diag_meas_log_stride = 10;
@@ -148,6 +152,11 @@ struct FejConfig {
   int ri_vel_gyro_noise_mode = -1;
   // RI 注入逆变换中，位置项 dr -= Skew(p_local)*dphi 是否启用。
   bool ri_inject_pos_inverse = true;
+  // 机理归因调试开关。
+  string debug_force_process_model = "auto";
+  string debug_force_vel_jacobian = "auto";
+  bool debug_disable_true_reset_gamma = false;
+  bool debug_enable_standard_reset_gamma = false;
 };
 
 /**
@@ -156,12 +165,14 @@ struct FejConfig {
  */
 struct StateAblationConfig {
   bool disable_gnss_lever_arm = false;  // x[28:30]
+  bool disable_gnss_lever_z = false;    // x[30]
   bool disable_odo_lever_arm = false;   // x[25:27]
   bool disable_odo_scale = false;       // x[21]
   bool disable_gyro_bias = false;       // x[12:14]
   bool disable_gyro_scale = false;      // x[15:17]
   bool disable_accel_scale = false;     // x[18:20]
   bool disable_mounting = false;        // x[22:24]
+  bool disable_mounting_roll = false;   // x[22]
 };
 
 /**
@@ -176,7 +187,8 @@ struct PostGnssAblationConfig {
 /**
  * 初始化相关配置。
  * use_truth_pva 决定是否用真值初始化 p/v/q；
- * ba0/bg0 为加速度计/陀螺零偏初值；P0_diag 为初始协方差对角线。
+ * ba0/bg0 为加速度计/陀螺零偏初值；
+ * 若显式提供 `P0_diag`，则其优先于 `std_*` 字段直接构造初始协方差对角线。
  */
 struct InitConfig {
   bool use_truth_pva = true;
@@ -217,6 +229,7 @@ struct InitConfig {
   // true 时 init 与 constraints 外参冲突将直接报错
   bool strict_extrinsic_conflict = false;
 
+  bool has_custom_P0_diag = false;
   Matrix<double, kStateDim, 1> P0_diag =
       (Matrix<double, kStateDim, 1>() <<
        // [0-2] pos
@@ -260,6 +273,7 @@ struct FusionOptions {
   bool enable_gnss_velocity = true;
   string pos_path = "POS.txt";
   string output_path = "SOL.txt";
+  string state_series_output_path = "";
   // 共享配置
   AnchorsConfig anchors;
   UwbAnchorSchedule uwb_anchor_schedule;
@@ -369,6 +383,7 @@ struct FusionResult {
   vector<Vector3d> fused_positions;
   vector<Vector3d> fused_velocities;
   vector<Vector4d> fused_quaternions;
+  vector<double> mounting_roll;   // 安装横滚角 (rad)
   vector<double> mounting_pitch;  // 安装俯仰角 (rad)
   vector<double> mounting_yaw;    // 安装航向角 (rad)
   vector<double> odo_scale;       // 里程计比例因子
@@ -446,3 +461,9 @@ EvaluationSummary EvaluateFusion(const FusionResult &result,
  * 将评估结果保存为文本矩阵文件。
  */
 void SaveFusionResult(const string &path, const EvaluationSummary &summary);
+
+/**
+ * 导出实验专用状态序列文件。
+ */
+void SaveStateSeries(const string &path, const FusionResult &result,
+                     const FusionOptions &options);
