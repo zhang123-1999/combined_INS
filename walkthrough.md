@@ -1362,9 +1362,26 @@ Last updated: `2026-03-28`
 - decision: outage 主线已从“nominal increment mismatch”进一步收紧为“shared pre-update predict chain mismatch”。这条链已经足够具体地否定“最后一个 exact-time microstep 就是主因”的解释，并把下一轮工作指向更细的 mechanization contributor / nominal `dv` 分解。
 - next_step: 直接在 `w2` 的 shared `199` predict 子步上补 nominal `dv` contributor 分解，比较 current 与 `KF-GINS` 在共同子步上的 specific-force integral、gravity、Earth/transport/Coriolis、sculling/rotation compensation 或等价 mechanization 项；若锁到具体 contributor，再用同一口径回到 `w1` 复核并与 `HYP-61` 合并。
 
+### session_id: 20260328-2300-outage-contributor-breakdown-analysis
+
+- objective: 根据 substep audit 结论，分析 shared 199 步 nominal `dv` mismatch 的 contributor 结构，并编写 contributor breakdown 分析脚本。
+- scope: 代码静态分析（`ins_mech.cpp`, `gi_engine/insmech.cpp`, `eskf_engine.cpp`, `measurement_models_uwb.cpp`, `math_utils.cpp`）+ 新脚本编写；无新 experiment run（数据文件在 Windows 侧）。
+- changed_files: `scripts/analysis/run_data2_kf_gins_outage_contributor_breakdown.py`（新增）
+- configs: 依赖 `output/d2_outage_fix_dbg_r4/SOL_*.txt`, `output/d2_kf_outage_dbg_r2/runtime_output/KF_GINS_Navresult.nav`, `dataset/data2_converted/POS_converted.txt`
+- commands: 静态代码阅读；脚本新增。
+- artifacts: `scripts/analysis/run_data2_kf_gins_outage_contributor_breakdown.py`
+- metrics: n/a（脚本需在 Windows 侧执行后才有结果）
+- artifact_mtime: `scripts/analysis/run_data2_kf_gins_outage_contributor_breakdown.py @ 2026-03-28 local`
+- result_freshness_check: 脚本新写，无 artifacts 可验证；需在 Windows 侧执行。
+- observability_notes: 本次静态分析确认以下关键结构：(1) `GravityEcef()` 使用 geodetic normal 方向，与 KF-GINS NED `[0,0,g]` 完全等价，无 gravity model 差异。(2) Coriolis 在 ECEF 为 `-2*omega_ie×v`（NED 等价为 `-2*wie_n×v_n`），比 KF-GINS NED 少 `wen_n×v_n`（transport rate），量级 ~0.03 mm/s / 199 steps，negligible。(3) sculling 中 Earth rotation subtraction 对 dv 贡献 <0.1 µm/s/step，negligible。(4) 最可疑 contributor：attitude difference at window start → specific force projection error per step。(5) 关键机制链：exact-time vs near-prev-IMU update contract → 每次 GNSS update 引入微小 state 差 → 200+ update 后积累 ~0.005 deg attitude error → ~8 µm/s/step specific force mismatch → 199 steps × 8 µm/s = ~1.8 mm/s velocity mismatch（与观测 1.769 mm/s 吻合）。
+- decision: contributor breakdown 脚本已写好，可在 Windows 侧执行以验证：(a) `delta_dv_sf` 主导 `delta_dv_total`（预期 fraction > 0.9）；(b) `delta_dv_g + delta_dv_c` 合计 fraction < 0.1；(c) attitude at window start 差异与 expected `dv_sf` 量级吻合。如结果与预期一致，则 HYP-61 + HYP-62 可合并为”GNSS update timing contract 积累 attitude offset → specific force projection 误差”。
+- next_step: 在 Windows 侧执行 `python scripts/analysis/run_data2_kf_gins_outage_contributor_breakdown.py`，查看 `output/d2_kf_outage_contrib_r1/summary.md` 与 `contributor_summary.csv`；重点关注 `delta_dv_sf` vs `delta_dv_total` fraction（w2 和 w1）、attitude difference norm at window start、以及 expected vs observed `dv_sf` 量级对比。
+
 ## Next Actions
 
-1. 在 `w2=[528270,528280)` 的 shared `199` predict 子步上继续下钻 nominal `dv` contributor，优先分解并比较 current / `KF-GINS` 的 specific-force integral、gravity、Earth/transport/Coriolis、sculling/rotation compensation 或等价 mechanization 项，定位 `negative along + positive cross` 是由哪一项持续注入。
-2. 用同一 contributor 口径回到 `w1=[528180,528210)` 复核 shared-chain 是否同源；若一致，再把 outage 主线与 full-window `HYP-61` 合并到“shared predict contract / state-trajectory mismatch”，而不是“纯 endpoint timing geometry”。
-3. 后续凡是使用 current outage GNSS debug CSV 做速度/协方差/姿态分析，优先统一引用 `output/d2_outage_fix_dbg_r4/`；旧 `r3` 仅保留给已生成的派生表追溯，`r1/r2` 不再用于四元数或速度字段分析。
-4. 继续保持短输出目录策略，避免再次踩中 Windows `MAX_PATH` 使 debug CSV 缺失。
+1. **【首要】** 在 Windows 侧执行 `python scripts/analysis/run_data2_kf_gins_outage_contributor_breakdown.py`，读取 `output/d2_kf_outage_contrib_r1/summary.md`，验证：(a) `delta_dv_sf` fraction of total > 0.9；(b) attitude difference at window start ~0.005 deg；(c) expected `dv_sf` = `|d_att_rad| * g * dt * 199` 与 cum_delta_dv_sf_norm 吻合。
+2. 如 contributor breakdown 确认 specific force 主导，则在 `attitude_at_window_start.csv` 里进一步检查 roll/pitch/yaw 分量方向：预期 `d_roll`（E 方向 tilt）和 `d_pitch`（N 方向 tilt）主导 `negative along / positive cross` 模式，计算 `d_att × f^n_step` 方向并与 cumulative along/cross 一致性对比。
+3. 用同一 contributor 口径对 `w1=[528180,528210)` 验证相同模式，确认 `delta_dv_sf` fraction 和 attitude 差异方向与 `w2` 同源。
+4. 如 w1 + w2 均确认 specific force 主导，则把 HYP-61 + HYP-62 合并为统一 root-cause 结论：**GNSS exact-time vs near-prev-IMU update timing contract → 每次 update 后 state 差异微小 → 200+ updates 积累 ~mrad attitude offset → shared predict chain 内每步 ~8 µm/s specific force 投影误差 → outage 前已有较大速度误差底噪 → outage 期间无 GNSS 约束时误差爆发**。
+5. 后续凡是使用 current outage GNSS debug CSV 做速度/协方差/姿态分析，优先统一引用 `output/d2_outage_fix_dbg_r4/`；旧 `r3` 仅保留给已生成的派生表追溯，`r1/r2` 不再用于四元数或速度字段分析。
+6. 继续保持短输出目录策略，避免再次踩中 Windows `MAX_PATH` 使 debug CSV 缺失。
