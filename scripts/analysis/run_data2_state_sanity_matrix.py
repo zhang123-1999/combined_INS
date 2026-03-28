@@ -43,6 +43,8 @@ K_STATE_DIM = 31
 K_RAD_TO_DEG = 180.0 / math.pi
 K_DEG_TO_RAD = math.pi / 180.0
 K_MGAL_TO_MS2 = 1.0e-5
+DATA2_README_DEFAULT = REPO_ROOT / "dataset/data2/README.md"
+DATA2_EXTRINSIC_IMU_DEFAULT = "POS-320"
 
 STATE_ORDER = [
     "ba_x",
@@ -207,6 +209,7 @@ def compute_body_frame_gnss_lever(
         rtk_path,
         sep=r"\s+",
         header=None,
+        usecols=list(range(7)),
         names=["timestamp", "lat", "lon", "h", "std_n", "std_e", "std_d"],
     )
     pos_df = pd.read_csv(
@@ -259,6 +262,68 @@ def compute_body_frame_gnss_lever(
     }
 
 
+def normalize_readme_key(value: str) -> str:
+    return value.strip().lower().replace("-", "").replace(" ", "")
+
+
+def parse_data2_readme_static_vector(
+    readme_path: Path,
+    section_title: str,
+    imu_model: str,
+) -> list[float]:
+    lines = readme_path.read_text(encoding="utf-8").splitlines()
+    target = normalize_readme_key(imu_model)
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_section = stripped == f"## {section_title}"
+            continue
+        if not in_section or not stripped.startswith("|"):
+            continue
+        if ":---" in stripped or "---" in stripped:
+            continue
+        parts = [part.strip() for part in stripped.strip("|").split("|")]
+        if len(parts) < 4:
+            continue
+        row_key = normalize_readme_key(parts[0])
+        if row_key in {"imu", "1to2"}:
+            continue
+        if row_key == target:
+            return [float(parts[1]), float(parts[2]), float(parts[3])]
+    raise RuntimeError(f"failed to locate `{imu_model}` in section `{section_title}` from {readme_path}")
+
+
+def parse_data2_readme_imu_process_params(readme_path: Path, imu_model: str) -> dict[str, float]:
+    lines = readme_path.read_text(encoding="utf-8").splitlines()
+    target = normalize_readme_key(imu_model)
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_section = stripped == "## IMU 参数"
+            continue
+        if not in_section or "|" not in stripped:
+            continue
+        parts = [part.strip() for part in stripped.strip("|").split("|")]
+        if len(parts) < 8:
+            continue
+        row_key = normalize_readme_key(parts[0])
+        if row_key in {"imu", ""}:
+            continue
+        if row_key == target:
+            return {
+                "imu_model": imu_model,
+                "sigma_bg_degh": float(parts[3]),
+                "sigma_ba_mgal": float(parts[4]),
+                "corr_time_hr": float(parts[5]),
+                "sigma_sg_ppm": float(parts[6]),
+                "sigma_sa_ppm": float(parts[7]),
+                "corr_time_s": float(parts[5]) * 3600.0,
+            }
+    raise RuntimeError(f"failed to locate IMU row `{imu_model}` in {readme_path}")
+
+
 def human_to_internal(group: str, value: float) -> float:
     if group == "ba":
         return float(value * K_MGAL_TO_MS2)
@@ -281,11 +346,22 @@ def family_static_eps_human(group: str) -> float:
     return 1.0e-6
 
 
-def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
+def build_truth_reference(
+    base_cfg: dict[str, Any],
+    readme_path: Path | None = None,
+    extrinsic_imu_model: str = DATA2_EXTRINSIC_IMU_DEFAULT,
+) -> dict[str, Any]:
     fusion = base_cfg["fusion"]
     start_time = float(fusion["starttime"])
     final_time = float(fusion["finaltime"])
     constraints_mount = fusion["constraints"]["imu_mounting_angle"]
+    readme_path = readme_path.resolve() if readme_path is not None else DATA2_README_DEFAULT.resolve()
+    if not readme_path.exists():
+        raise FileNotFoundError(f"missing data2 README: {readme_path}")
+    readme_rel = rel_from_root(readme_path, REPO_ROOT)
+    gnss_lever_nominal = parse_data2_readme_static_vector(readme_path, "天线杆臂", extrinsic_imu_model)
+    odo_lever_nominal = parse_data2_readme_static_vector(readme_path, "里程计杆臂", extrinsic_imu_model)
+    imu_process_params = parse_data2_readme_imu_process_params(readme_path, extrinsic_imu_model)
     gnss_lever_info = compute_body_frame_gnss_lever(
         (REPO_ROOT / "dataset/data2/rtk.txt").resolve(),
         (REPO_ROOT / fusion["pos_path"]).resolve(),
@@ -306,7 +382,15 @@ def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
         "sg": [1000.0, 6000.0, -4000.0],
         "sa": [2600.0, 8400.0, 300.0],
     }
-    instability_human = {"ba": 50.0, "bg": 48.0, "sg": 500.0, "sa": 500.0}
+    dynamic_mean_source = "docs/notes/初始姿态和参数.md"
+    dynamic_process_source = f"{readme_rel} {extrinsic_imu_model} IMU parameters"
+    instability_human = {
+        "ba": float(imu_process_params["sigma_ba_mgal"]),
+        "bg": float(imu_process_params["sigma_bg_degh"]),
+        "sg": float(imu_process_params["sigma_sg_ppm"]),
+        "sa": float(imu_process_params["sigma_sa_ppm"]),
+    }
+    markov_corr_time_s = float(imu_process_params["corr_time_s"])
     static_truth_human = {
         "odo_scale": 1.0,
         "mounting": [
@@ -314,8 +398,8 @@ def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
             mounting_state_truth_deg["pitch"],
             mounting_state_truth_deg["yaw"],
         ],
-        "odo_lever": [0.2, -1.0, 0.6],
-        "gnss_lever": gnss_lever_info["value_m"],
+        "odo_lever": odo_lever_nominal,
+        "gnss_lever": gnss_lever_nominal,
     }
 
     state_refs: dict[str, Any] = {}
@@ -326,7 +410,7 @@ def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
         dynamic = bool(meta["dynamic"])
         if dynamic:
             value_human = float(dynamic_truth_human[group][axis])
-            source = "docs/notes/初始姿态和参数.md"
+            source = f"{dynamic_mean_source} (mean) + {dynamic_process_source} (sigma/tau)"
             instability = float(instability_human[group])
         elif group == "odo_scale":
             value_human = float(static_truth_human["odo_scale"])
@@ -338,11 +422,11 @@ def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
             instability = None
         elif group == "odo_lever":
             value_human = float(static_truth_human["odo_lever"][axis])
-            source = "dataset/data2/README.md POS320 ODO lever arm"
+            source = f"{readme_rel} {extrinsic_imu_model} ODO lever arm"
             instability = None
         elif group == "gnss_lever":
             value_human = float(static_truth_human["gnss_lever"][axis])
-            source = "dataset/data2/README.md POS320 GNSS lever arm + RTK/POS body-frame median validation"
+            source = f"{readme_rel} {extrinsic_imu_model} GNSS lever arm"
             instability = None
         else:
             raise KeyError(f"unsupported state group: {group}")
@@ -358,16 +442,50 @@ def build_truth_reference(base_cfg: dict[str, Any]) -> dict[str, Any]:
             "source": source,
         }
         if dynamic:
+            state_refs[state_name]["reference_source"] = dynamic_mean_source
+            state_refs[state_name]["instability_source"] = dynamic_process_source
             state_refs[state_name]["instability"] = instability
             state_refs[state_name]["instability_internal"] = human_to_internal(group, instability)
-            state_refs[state_name]["markov_corr_time_s"] = 3600.0
+            state_refs[state_name]["markov_corr_time_s"] = markov_corr_time_s
+            state_refs[state_name]["markov_corr_time_hr"] = float(imu_process_params["corr_time_hr"])
+
+    gnss_lever_diag_delta = (
+        np.array(gnss_lever_info["value_m"], dtype=float) - np.array(gnss_lever_nominal, dtype=float)
+    ).tolist()
 
     return {
         "catalog_generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "sources": {
-            "dynamic_initial_and_instability": "docs/notes/初始姿态和参数.md",
-            "odo_lever_truth": "dataset/data2/README.md",
-            "gnss_lever_truth": gnss_lever_info,
+            "dynamic_initial_and_instability": f"{dynamic_mean_source} (mean) + {dynamic_process_source} (sigma/tau)",
+            "dynamic_initial_value_source": dynamic_mean_source,
+            "dynamic_instability_and_corr_time": {
+                "imu_model": extrinsic_imu_model,
+                "source": dynamic_process_source,
+                "sigma_ba_mgal": float(imu_process_params["sigma_ba_mgal"]),
+                "sigma_bg_degh": float(imu_process_params["sigma_bg_degh"]),
+                "sigma_sg_ppm": float(imu_process_params["sigma_sg_ppm"]),
+                "sigma_sa_ppm": float(imu_process_params["sigma_sa_ppm"]),
+                "corr_time_hr": float(imu_process_params["corr_time_hr"]),
+            },
+            "extrinsic_truth_readme": readme_rel,
+            "extrinsic_truth_target_imu": extrinsic_imu_model,
+            "odo_lever_truth": {
+                "imu_model": extrinsic_imu_model,
+                "value_m": [float(x) for x in odo_lever_nominal],
+                "source": f"{readme_rel} {extrinsic_imu_model} ODO lever arm",
+                "role": "official_nominal_truth",
+            },
+            "gnss_lever_truth": {
+                "imu_model": extrinsic_imu_model,
+                "value_m": [float(x) for x in gnss_lever_nominal],
+                "source": f"{readme_rel} {extrinsic_imu_model} GNSS lever arm",
+                "role": "official_nominal_truth",
+            },
+            "gnss_lever_diagnostic_body_median": {
+                **gnss_lever_info,
+                "role": "diagnostic_only",
+                "delta_vs_nominal_m": [float(x) for x in gnss_lever_diag_delta],
+            },
             "mounting_total_truth": {
                 "value_deg": total_mounting_truth_deg,
                 "source": "dataset/data2/README.md commented mounting table",
@@ -507,6 +625,7 @@ def build_case_config(
     constraints_cfg["enable_consistency_log"] = False
     constraints_cfg["enable_mechanism_log"] = False
     init_cfg["use_truth_pva"] = True
+    init_cfg["runtime_truth_anchor_pva"] = True
     init_cfg["use_legacy_mounting_base_logic"] = False
     init_cfg["lever_arm_source"] = "init"
     init_cfg["strict_extrinsic_conflict"] = False
@@ -1078,10 +1197,16 @@ def write_summary(
             "",
             "## Notes",
             (
-                f"- GNSS lever truth validation median: "
+                f"- GNSS lever official nominal (`{truth_reference['sources']['gnss_lever_truth']['imu_model']}`): "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][0]))}`, "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][1]))}`, "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][2]))}` m."
+            ),
+            (
+                "- GNSS lever diagnostic RTK/POS body median (do not use for ranking): "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][0]))}`, "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][1]))}`, "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][2]))}` m."
             ),
             (
                 f"- manifest freshness: `{manifest['generated_at']}`; "

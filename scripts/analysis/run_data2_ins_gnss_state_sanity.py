@@ -97,6 +97,7 @@ def build_case_config(
     truth_reference: dict[str, Any],
     case_id: str,
     case_dir: Path,
+    gnss_path: Path,
 ) -> dict[str, Any]:
     cfg = copy.deepcopy(base_cfg)
     fusion = cfg.setdefault("fusion", {})
@@ -110,7 +111,7 @@ def build_case_config(
     sol_path = case_dir / f"SOL_{case_id}.txt"
     state_series_path = case_dir / f"state_series_{case_id}.csv"
     fusion["enable_gnss_velocity"] = False
-    fusion["gnss_path"] = "dataset/data2/rtk.txt"
+    fusion["gnss_path"] = rel_from_root(gnss_path, REPO_ROOT)
     fusion["output_path"] = rel_from_root(sol_path, REPO_ROOT)
     fusion["state_series_output_path"] = rel_from_root(state_series_path, REPO_ROOT)
     fusion["gnss_schedule"] = {"enabled": False}
@@ -130,6 +131,7 @@ def build_case_config(
     constraints_cfg["enable_mechanism_log"] = False
 
     init_cfg["use_truth_pva"] = True
+    init_cfg["runtime_truth_anchor_pva"] = True
     init_cfg["use_legacy_mounting_base_logic"] = False
     init_cfg["lever_arm_source"] = "init"
     init_cfg["strict_extrinsic_conflict"] = False
@@ -240,8 +242,9 @@ def write_case_config(
     truth_reference: dict[str, Any],
     case_id: str,
     case_dir: Path,
+    gnss_path: Path,
 ) -> Path:
-    cfg = build_case_config(base_cfg, truth_reference, case_id, case_dir)
+    cfg = build_case_config(base_cfg, truth_reference, case_id, case_dir, gnss_path)
     cfg_path = case_dir / f"config_{case_id}.yaml"
     save_yaml(cfg, cfg_path)
     return cfg_path
@@ -449,10 +452,16 @@ def write_summary(
             f"- case_metrics: `{manifest['case_metrics_csv']}`",
             f"- state_judgement: `{manifest['state_judgement_csv']}`",
             (
-                f"- GNSS lever truth validation median: "
+                f"- GNSS lever official nominal (`{truth_reference['sources']['gnss_lever_truth']['imu_model']}`): "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][0]))}`, "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][1]))}`, "
                 f"`{format_metric(float(truth_reference['sources']['gnss_lever_truth']['value_m'][2]))}` m."
+            ),
+            (
+                "- GNSS lever diagnostic RTK/POS body median (do not use for ranking): "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][0]))}`, "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][1]))}`, "
+                f"`{format_metric(float(truth_reference['sources']['gnss_lever_diagnostic_body_median']['value_m'][2]))}` m."
             ),
         ]
     )
@@ -492,10 +501,17 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         help="Optional subset of case ids. Control is auto-inserted when omitted.",
     )
+    parser.add_argument(
+        "--gnss-path",
+        type=Path,
+        default=Path("dataset/data2/rtk.txt"),
+        help="GNSS file used by the INS/GNSS-only sanity rerun.",
+    )
     args = parser.parse_args()
     args.base_config = (REPO_ROOT / args.base_config).resolve()
     args.exe = (REPO_ROOT / args.exe).resolve()
     args.output_dir = (REPO_ROOT / args.output_dir).resolve()
+    args.gnss_path = (REPO_ROOT / args.gnss_path).resolve()
     args.artifacts_dir = args.output_dir / "artifacts"
     args.case_root = args.artifacts_dir / "cases"
     args.plot_dir = args.output_dir / "plots"
@@ -509,6 +525,8 @@ def main() -> None:
         raise FileNotFoundError(f"missing base config: {args.base_config}")
     if not args.exe.exists():
         raise FileNotFoundError(f"missing executable: {args.exe}")
+    if not args.gnss_path.exists():
+        raise FileNotFoundError(f"missing GNSS file: {args.gnss_path}")
 
     reset_directory(args.output_dir)
     ensure_dir(args.artifacts_dir)
@@ -530,7 +548,7 @@ def main() -> None:
     for case_id in args.case_ids:
         case_dir = args.case_root / case_id
         ensure_dir(case_dir)
-        cfg_path = write_case_config(base_cfg, truth_reference, case_id, case_dir)
+        cfg_path = write_case_config(base_cfg, truth_reference, case_id, case_dir, args.gnss_path)
         case_config_paths[case_id] = rel_from_root(cfg_path, REPO_ROOT)
         case_rows.append(run_case(case_id=case_id, cfg_path=cfg_path, case_dir=case_dir, exe_path=args.exe))
 
@@ -580,6 +598,7 @@ def main() -> None:
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "base_config": rel_from_root(args.base_config, REPO_ROOT),
         "solver_exe": rel_from_root(args.exe, REPO_ROOT),
+        "gnss_path": rel_from_root(args.gnss_path, REPO_ROOT),
         "output_dir": rel_from_root(args.output_dir, REPO_ROOT),
         "artifacts_dir": rel_from_root(args.artifacts_dir, REPO_ROOT),
         "plots_dir": rel_from_root(args.plot_dir, REPO_ROOT),

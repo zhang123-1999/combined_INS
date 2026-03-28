@@ -111,6 +111,18 @@ def extract_on_windows(config: dict[str, Any]) -> list[tuple[float, float]]:
 
     schedule_cfg = fusion.get("gnss_schedule") or {}
     if schedule_cfg.get("enabled", False):
+        enabled_windows = schedule_cfg.get("enabled_windows") or []
+        if enabled_windows:
+            windows: list[tuple[float, float]] = []
+            for item in enabled_windows:
+                if not isinstance(item, dict):
+                    continue
+                start = item.get("start_time")
+                end = item.get("end_time")
+                if start is None or end is None:
+                    continue
+                windows.append((float(start), float(end)))
+            return merge_windows(windows)
         head_ratio = float(schedule_cfg.get("head_ratio", 0.0) or 0.0)
         if head_ratio > 0.0:
             split_t = start_time + head_ratio * (final_time - start_time)
@@ -614,7 +626,12 @@ def run_standard_plot(
 
 def parse_args() -> argparse.Namespace:
     today = dt.datetime.now().strftime("%Y%m%d")
-    parser = argparse.ArgumentParser(description="Run the official standardized data2 RTK ESKF GNSS outage evaluation.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a legacy-style data2 RTK ESKF GNSS outage evaluation. "
+            "The canonical baseline runner is scripts/analysis/run_data2_baseline_current.py."
+        )
+    )
     parser.add_argument(
         "--base-config",
         type=Path,
@@ -630,17 +647,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output/data2_eskf_baseline"),
-        help="Standard result directory relative to repo root.",
+        default=Path("output/data2_baseline_current_outage_eval"),
+        help="Legacy outage-eval result directory relative to repo root.",
     )
     parser.add_argument(
         "--result-name",
-        default="data2_eskf_baseline",
-        help="Canonical standardized result name.",
+        default="data2_baseline_current_outage_eval",
+        help="Legacy outage-eval result name.",
     )
     parser.add_argument(
         "--exp-id",
-        default=f"EXP-{today}-data2-eskf-baseline-output-r2",
+        default=f"EXP-{today}-data2-baseline-current-outage-eval-r1",
         help="Experiment identifier recorded in manifest and walkthrough.",
     )
     parser.add_argument("--initial-on", type=float, default=300.0)

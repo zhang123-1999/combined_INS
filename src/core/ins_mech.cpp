@@ -87,9 +87,9 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
   Vector3d dtheta_bc_curr = imu_curr.dtheta - state.bg * dt;
   Vector3d dvel_bc_prev = imu_prev.dvel - state.ba * imu_prev.dt;
   Vector3d dvel_bc_curr = imu_curr.dvel - state.ba * dt;
-  // 2) 补偿比例因子: (I - diag(s)) * bias_corrected = (1-s) .* bc
-  Vector3d sf_g = Vector3d::Ones() - state.sg;  // 陀螺比例因子修正系数
-  Vector3d sf_a = Vector3d::Ones() - state.sa;  // 加速度计比例因子修正系数
+  // 2) 补偿比例因子: bias_corrected / (1 + s)
+  Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
+  Vector3d sf_a = (Vector3d::Ones() + state.sa).cwiseInverse();
   Vector3d dtheta_prev = sf_g.cwiseProduct(dtheta_bc_prev) - omega_ie_b * imu_prev.dt;
   Vector3d dtheta_curr = sf_g.cwiseProduct(dtheta_bc_curr) - omega_ie_b * dt;
   Vector3d dvel_prev = sf_a.cwiseProduct(dvel_bc_prev);
@@ -139,8 +139,12 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
  *   φ̇ = -(ω_in^n ×) φ - C_b^n δω_ib^b + δω_in^n
  *
  * @param C_bn 姿态矩阵 C_b^n (body -> NED)
- * @param f_b 机体系比力
- * @param omega_ib_b 机体系角速度
+ * @param f_b_corr 机体系修正后比力
+ * @param omega_ib_b_corr 机体系修正后角速度
+ * @param f_b_unbiased 机体系去零偏、未做比例因子修正的比力
+ * @param omega_ib_b_unbiased 机体系去零偏、未做比例因子修正的角速度
+ * @param sf_a 加速度计比例因子修正系数 (1+sa)^-1
+ * @param sf_g 陀螺比例因子修正系数 (1+sg)^-1
  * @param v_ned NED速度
  * @param lat 纬度（弧度）
  * @param h 高度（米）
@@ -150,8 +154,12 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
  * @param Qd 输出离散过程噪声
  */
 void InsMech::BuildProcessModel(const Matrix3d &C_bn,
-                                const Vector3d &f_b,
-                                const Vector3d &omega_ib_b,
+                                const Vector3d &f_b_corr,
+                                const Vector3d &omega_ib_b_corr,
+                                const Vector3d &f_b_unbiased,
+                                const Vector3d &omega_ib_b_unbiased,
+                                const Vector3d &sf_a,
+                                const Vector3d &sf_g,
                                 const Vector3d &v_ned,
                                 double lat, double h, double dt,
                                 const NoiseParams &np,
@@ -203,7 +211,7 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
 
   // 当前帧修正后 IMU 参考量（body->NED 变换）
-  Vector3d a_m_ned = C_bn * f_b;
+  Vector3d a_m_ned = C_bn * f_b_corr;
 
   // 连续时间误差模型 F（NED系）
   Matrix<double, kStateDim, kStateDim> F = Matrix<double, kStateDim, kStateDim>::Zero();
@@ -246,12 +254,14 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
     F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = Skew(a_m_ned);
   }
 
-  // F_vba = -C_b^n（标准ESKF约定）
-  F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -C_bn;
+  // f_corr = diag((1+sa)^-1) * f_unbiased，因此对 ba/sa 的导数应分别带上
+  // diag((1+sa)^-1) 与 f_unbiased .* (1+sa)^-2。
+  const Matrix3d sf_a_diag = sf_a.asDiagonal().toDenseMatrix();
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -C_bn * sf_a_diag;
 
-  // F_vsa = -C_b^n * diag(f^b)（标准ESKF约定）
-  Matrix3d diag_fb = f_b.asDiagonal();
-  F.block<3, 3>(StateIdx::kVel, StateIdx::kSa) = -C_bn * diag_fb;
+  Matrix3d diag_fb_unbiased =
+      (f_b_unbiased.cwiseProduct(sf_a.cwiseProduct(sf_a))).asDiagonal();
+  F.block<3, 3>(StateIdx::kVel, StateIdx::kSa) = -C_bn * diag_fb_unbiased;
 
   // === 姿态误差 φ̇ ===
   // F_φr = ∂ω_in^n/∂r
@@ -276,16 +286,18 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
   // RI-EKF 与标准 ESKF 在该项一致：F_φφ = -(ω_in^n ×)
   F.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = -Skew(omega_in_n);
 
-  // F_φbg = -C_b^n（标准ESKF约定）
-  F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -C_bn;
+  // omega_corr = diag((1+sg)^-1) * omega_unbiased，因此对 bg/sg 的导数应分别带上
+  // diag((1+sg)^-1) 与 omega_unbiased .* (1+sg)^-2。
+  const Matrix3d sf_g_diag = sf_g.asDiagonal().toDenseMatrix();
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -C_bn * sf_g_diag;
 
-  // F_φsg = -C_b^n * diag(ω_ib^b)（标准ESKF约定）
-  Matrix3d diag_wib = omega_ib_b.asDiagonal();
-  F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -C_bn * diag_wib;
+  Matrix3d diag_wib_unbiased =
+      (omega_ib_b_unbiased.cwiseProduct(sf_g.cwiseProduct(sf_g))).asDiagonal();
+  F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -C_bn * diag_wib_unbiased;
 
   if (use_true_iekf) {
-    Matrix3d neg_skew_omega = -Skew(omega_ib_b);
-    Matrix3d diag_fb_body = f_b.asDiagonal();
+    Matrix3d neg_skew_omega = -Skew(omega_ib_b_corr);
+    Matrix3d diag_fb_body = diag_fb_unbiased;
 
     F.block<3, 3>(StateIdx::kPos, StateIdx::kPos) = neg_skew_omega;
     F.block<3, 3>(StateIdx::kPos, StateIdx::kVel) = Matrix3d::Identity();
@@ -293,15 +305,15 @@ void InsMech::BuildProcessModel(const Matrix3d &C_bn,
 
     F.block<3, 3>(StateIdx::kVel, StateIdx::kPos).setZero();
     F.block<3, 3>(StateIdx::kVel, StateIdx::kVel) = neg_skew_omega;
-    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = -Skew(f_b);
-    F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -Matrix3d::Identity();
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kAtt) = -Skew(f_b_corr);
+    F.block<3, 3>(StateIdx::kVel, StateIdx::kBa) = -sf_a_diag;
     F.block<3, 3>(StateIdx::kVel, StateIdx::kSa) = -diag_fb_body;
 
     F.block<3, 3>(StateIdx::kAtt, StateIdx::kPos).setZero();
     F.block<3, 3>(StateIdx::kAtt, StateIdx::kVel).setZero();
     F.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt) = neg_skew_omega;
-    F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -Matrix3d::Identity();
-    F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -diag_wib;
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kBg) = -sf_g_diag;
+    F.block<3, 3>(StateIdx::kAtt, StateIdx::kSg) = -diag_wib_unbiased;
   }
 
   // === IMU误差（马尔可夫模型）===

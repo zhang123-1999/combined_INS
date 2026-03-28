@@ -11,6 +11,19 @@
 
 系统状态维度为 31，含比例因子、安装角、ODO 杆臂、GNSS 杆臂等外参估计项。
 
+## 当前 Canonical Baseline
+
+- 官方 baseline 配置：`config_data2_baseline_eskf.yaml`
+- 官方 baseline runner：`python scripts/analysis/run_data2_baseline_current.py`
+- 官方 baseline 产物目录：`output/data2_baseline_current/`
+- supporting / historical sweep seed：`config_data2_research_seed_eskf.yaml`
+- 最小保留证据链：
+  - `output/data2_staged_g5_no_imu_scale_r2_20260325/`
+  - `output/data2_staged_g5_odo_scale_phase2_seed_sweep_r1_20260326/`
+  - `output/data2_staged_g5_odo_lever_phase2_seed_sweep_r2_20260326/`
+  - `output/data2_staged_g5_odo_lever_process_q_sweep_r1_20260326/`
+- `2026-03-26` baseline finalization 后，其余历史 `output/data2_*` 目录统一归档到 `archive/output_legacy/20260326-baseline-finalization/`
+
 ## 特性概览
 
 - 31 维状态：`p v att ba bg sg sa odo_scale mounting(roll/pitch/yaw) lever_odo lever_gnss`
@@ -103,11 +116,21 @@ cmake --build build --config Release
 ### 4) 结果绘图
 
 ```bash
-python plot_navresult.py SOL_data2_baseline_eskf.txt
+python plot_navresult.py output/data2_baseline_current/SOL_data2_baseline_current.txt
 ```
 
 - 支持读取 28/31 列新格式 SOL 文件
 - 图像输出到 `output/result_*`
+
+### 5) 官方 baseline 一键重跑
+
+```bash
+python scripts/analysis/run_data2_baseline_current.py
+```
+
+- 读取 `config_data2_baseline_eskf.yaml`
+- 输出到 `output/data2_baseline_current/`
+- 生成 `summary.md / manifest.json / case_metrics.csv / phase_metrics.csv / plots/`
 
 ## 输入数据格式
 

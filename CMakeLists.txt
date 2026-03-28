@@ -67,5 +67,8 @@ target_link_libraries(data_converter PRIVATE uwb_utils Eigen3::Eigen)
 add_executable(jacobian_audit apps/jacobian_audit_main.cpp)
 target_link_libraries(jacobian_audit PRIVATE uwb_app)
 
+add_executable(odo_nhc_bgz_jacobian_fd apps/odo_nhc_bgz_jacobian_fd_main.cpp)
+target_link_libraries(odo_nhc_bgz_jacobian_fd PRIVATE uwb_app)
+
 add_executable(regression_checks apps/regression_checks_main.cpp)
 target_link_libraries(regression_checks PRIVATE uwb_app)

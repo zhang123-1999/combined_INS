@@ -219,6 +219,12 @@ vector<string> BuildStateNames() {
 
 vector<BlockSpec> BuildFocusBlocks(const string &measurement) {
   vector<BlockSpec> blocks;
+  if (measurement == "GNSS_POS") {
+    blocks.push_back({"pos", StateIdx::kPos, 3});
+    blocks.push_back({"att", StateIdx::kAtt, 3});
+    blocks.push_back({"gnss_lever", StateIdx::kGnssLever, 3});
+    return blocks;
+  }
   if (measurement == "GNSS_VEL") {
     blocks.push_back({"vel", StateIdx::kVel, 3});
     blocks.push_back({"att", StateIdx::kAtt, 3});
@@ -269,7 +275,7 @@ Matrix3d BuildVehicleRotation(const Vector3d &mounting_base_rpy,
   Vector3d rpy(mounting_base_rpy.x(),
                mounting_base_rpy.y() + state.mounting_pitch,
                mounting_base_rpy.z() + state.mounting_yaw);
-  return QuatToRot(RpyToQuat(rpy));
+  return QuatToRot(RpyToQuat(rpy)).transpose();
 }
 
 State ParseStateFromSolRow(const RowVectorXd &row) {
@@ -469,12 +475,6 @@ bool ComputeOdoMeasurementAtTime(const Dataset &dataset,
   return true;
 }
 
-bool HasGnssVelocityData(const Dataset &dataset) {
-  return dataset.gnss.timestamps.size() > 0 &&
-         dataset.gnss.velocities.rows() == dataset.gnss.timestamps.size() &&
-         dataset.gnss.vel_std.rows() == dataset.gnss.timestamps.size();
-}
-
 bool ComputeGnssVelocityMeasurementAtIndex(const Dataset &dataset,
                                           int gnss_idx,
                                           double t_curr,
@@ -515,6 +515,59 @@ bool ComputeGnssVelocityMeasurementAtIndex(const Dataset &dataset,
     }
   }
   return true;
+}
+
+bool ComputeGnssPositionMeasurementAtIndex(const Dataset &dataset,
+                                          const NoiseParams &noise,
+                                          int gnss_idx,
+                                          double t_curr,
+                                          Vector3d &gnss_pos_ecef,
+                                          Vector3d &gnss_std_out) {
+  return ComputeAlignedGnssPositionMeasurement(dataset, noise, gnss_idx,
+                                               t_curr, gnss_pos_ecef,
+                                               gnss_std_out);
+}
+
+vector<AuditSample> SelectGnssPositionSamples(const Dataset &dataset,
+                                              const vector<SolRecord> &records,
+                                              double tol,
+                                              int max_samples,
+                                              double min_separation_s) {
+  vector<AuditSample> selected;
+  double last_t_state = -numeric_limits<double>::infinity();
+  for (int gnss_idx = 0; gnss_idx < dataset.gnss.timestamps.size(); ++gnss_idx) {
+    double t_gnss = dataset.gnss.timestamps(gnss_idx);
+    auto imu_it = lower_bound(dataset.imu.begin(), dataset.imu.end(), t_gnss - tol,
+                              [](const ImuData &sample, double t) { return sample.t < t; });
+    if (imu_it == dataset.imu.end()) {
+      continue;
+    }
+    int imu_idx = static_cast<int>(distance(dataset.imu.begin(), imu_it));
+    double t_state = dataset.imu[imu_idx].t;
+    if (std::abs(t_state - last_t_state) < min_separation_s) {
+      continue;
+    }
+    int record_idx = FindClosestRecordIndex(records, t_state);
+    if (record_idx < 0) {
+      continue;
+    }
+    const SolRecord &record = records[record_idx];
+    AuditSample sample;
+    sample.measurement = "GNSS_POS";
+    sample.record_idx = record_idx;
+    sample.meas_idx = gnss_idx;
+    sample.t_meas = t_gnss;
+    sample.t_state = t_state;
+    sample.speed_h = record.speed_h;
+    sample.yaw_rate_rad_s = record.yaw_rate_rad_s;
+    sample.turn_score = record.turn_score;
+    selected.push_back(sample);
+    last_t_state = t_state;
+    if (static_cast<int>(selected.size()) >= max_samples) {
+      break;
+    }
+  }
+  return selected;
 }
 
 vector<AuditSample> SelectGnssVelocitySamples(const Dataset &dataset,
@@ -957,7 +1010,7 @@ void SaveSummaryMarkdown(const fs::path &path,
                          const VectorXd &eps) {
   ofstream fout(path);
   fout << "# Jacobian Audit Summary\n\n";
-  fout << "- Target: `ODO/NHC/GNSS_VEL` numeric-Jacobian audit + GNSS split covariance + update-reset-covariance consistency\n";
+  fout << "- Target: `GNSS_POS/GNSS_VEL/ODO/NHC` numeric-Jacobian audit + optional GNSS split covariance + update-reset-covariance consistency\n";
   fout << "- Modes: audit the mode actually specified by each config (current run uses `true_iekf`)\n";
   fout << "- Finite difference: central difference on filter-consistent error injection\n";
   fout << "- Residual convention: compare analytic `H` against `-d(y)/d(dx)` because code stores `y = z - h`\n";
@@ -1004,7 +1057,7 @@ void SaveSummaryMarkdown(const fs::path &path,
     }
     fout << "\n";
 
-    for (const string measurement : {string("NHC"), string("ODO"), string("GNSS_VEL")}) {
+    for (const string measurement : {string("GNSS_POS"), string("GNSS_VEL"), string("NHC"), string("ODO")}) {
       vector<BlockError> errs;
       for (const auto &err : summary.block_errors) {
         if (err.measurement == measurement) errs.push_back(err);
@@ -1043,7 +1096,7 @@ void SaveSummaryMarkdown(const fs::path &path,
 
   fout << "## Top Columns\n\n";
   for (const string dataset : {string("data2"), string("data4")}) {
-    for (const string measurement : {string("NHC"), string("ODO"), string("GNSS_VEL")}) {
+    for (const string measurement : {string("GNSS_POS"), string("GNSS_VEL"), string("NHC"), string("ODO")}) {
       auto top_cols = CollectWorstColumns(summaries, dataset, measurement, 5);
       fout << "### " << dataset << ' ' << measurement << "\n\n";
       if (top_cols.empty()) {
@@ -1084,9 +1137,9 @@ AuditSummary RunAuditForConfig(const string &config_path,
   summary.split_t = ComputeSplitTime(options, dataset);
 
   vector<SolRecord> records = LoadSolutionRecords(sol_path.string());
-  vector<AuditSample> road_samples = SelectTurningSamples(records, summary.split_t, 5, 20.0);
-  if (road_samples.empty()) {
-    throw runtime_error("no post-split turning samples selected for " + config_path);
+  vector<AuditSample> road_samples;
+  if (options.constraints.enable_nhc || options.constraints.enable_odo) {
+    road_samples = SelectTurningSamples(records, summary.split_t, 5, 20.0);
   }
   summary.samples = road_samples;
 
@@ -1115,64 +1168,111 @@ AuditSummary RunAuditForConfig(const string &config_path,
       omega_ib_b_raw = imu.dtheta / imu.dt;
     }
 
-    double odo_speed = 0.0;
-    if (!ComputeOdoMeasurementAtTime(dataset, options.constraints, options.gating,
-                                     sample.t_state, odo_speed)) {
-      throw runtime_error("failed to interpolate ODO measurement for t=" + ToStringPrec(sample.t_state, 6));
-    }
-
-    auto nhc_builder = [&](const State &state) -> AuditModel {
-      Matrix3d C_b_v = BuildVehicleRotation(mounting_base_rpy, state);
-      auto model = MeasModels::ComputeNhcModel(state, C_b_v, omega_ib_b_raw,
-                                               options.constraints.sigma_nhc_y,
-                                               options.constraints.sigma_nhc_z,
-                                               fej_ptr);
-      return {model.y, model.H};
-    };
-    auto odo_builder = [&](const State &state) -> AuditModel {
-      Matrix3d C_b_v = BuildVehicleRotation(mounting_base_rpy, state);
-      auto model = MeasModels::ComputeOdoModel(state, odo_speed, C_b_v,
-                                               omega_ib_b_raw,
-                                               options.constraints.sigma_odo,
-                                               fej_ptr);
-      return {model.y, model.H};
-    };
-
-    AuditModel nhc_analytic = EvaluateModel(record.state, nhc_builder);
-    MatrixXd nhc_numeric = ComputeNumericalJacobian(record.state, fej_ptr, eps, nhc_builder);
-    auto nhc_block_errors = ComputeBlockErrors(summary.dataset, "NHC", sample.t_state,
-                                               sample.speed_h,
-                                               sample.yaw_rate_rad_s * kRadToDeg,
-                                               nhc_analytic.H, nhc_numeric,
-                                               BuildFocusBlocks("NHC"),
-                                               state_names);
-    auto nhc_column_errors = ComputeColumnErrors(summary.dataset, "NHC", sample.t_state,
+    if (options.constraints.enable_nhc) {
+      auto nhc_builder = [&](const State &state) -> AuditModel {
+        Matrix3d C_b_v = BuildVehicleRotation(mounting_base_rpy, state);
+        auto model = MeasModels::ComputeNhcModel(state, C_b_v, omega_ib_b_raw,
+                                                 options.constraints.sigma_nhc_y,
+                                                 options.constraints.sigma_nhc_z,
+                                                 fej_ptr);
+        return {model.y, model.H};
+      };
+      AuditModel nhc_analytic = EvaluateModel(record.state, nhc_builder);
+      MatrixXd nhc_numeric = ComputeNumericalJacobian(record.state, fej_ptr, eps, nhc_builder);
+      auto nhc_block_errors = ComputeBlockErrors(summary.dataset, "NHC", sample.t_state,
                                                  sample.speed_h,
                                                  sample.yaw_rate_rad_s * kRadToDeg,
                                                  nhc_analytic.H, nhc_numeric,
+                                                 BuildFocusBlocks("NHC"),
                                                  state_names);
-    summary.block_errors.insert(summary.block_errors.end(),
-                                nhc_block_errors.begin(), nhc_block_errors.end());
-    summary.column_errors.insert(summary.column_errors.end(),
-                                 nhc_column_errors.begin(), nhc_column_errors.end());
+      auto nhc_column_errors = ComputeColumnErrors(summary.dataset, "NHC", sample.t_state,
+                                                   sample.speed_h,
+                                                   sample.yaw_rate_rad_s * kRadToDeg,
+                                                   nhc_analytic.H, nhc_numeric,
+                                                   state_names);
+      summary.block_errors.insert(summary.block_errors.end(),
+                                  nhc_block_errors.begin(), nhc_block_errors.end());
+      summary.column_errors.insert(summary.column_errors.end(),
+                                   nhc_column_errors.begin(), nhc_column_errors.end());
+    }
 
-    AuditModel odo_analytic = EvaluateModel(record.state, odo_builder);
-    MatrixXd odo_numeric = ComputeNumericalJacobian(record.state, fej_ptr, eps, odo_builder);
-    auto odo_block_errors = ComputeBlockErrors(summary.dataset, "ODO", sample.t_state,
-                                               sample.speed_h,
-                                               sample.yaw_rate_rad_s * kRadToDeg,
-                                               odo_analytic.H, odo_numeric,
-                                               BuildFocusBlocks("ODO"),
-                                               state_names);
-    auto odo_column_errors = ComputeColumnErrors(summary.dataset, "ODO", sample.t_state,
+    if (options.constraints.enable_odo) {
+      double odo_speed = 0.0;
+      if (!ComputeOdoMeasurementAtTime(dataset, options.constraints, options.gating,
+                                       sample.t_state, odo_speed)) {
+        throw runtime_error("failed to interpolate ODO measurement for t=" + ToStringPrec(sample.t_state, 6));
+      }
+      auto odo_builder = [&](const State &state) -> AuditModel {
+        Matrix3d C_b_v = BuildVehicleRotation(mounting_base_rpy, state);
+        auto model = MeasModels::ComputeOdoModel(state, odo_speed, C_b_v,
+                                                 omega_ib_b_raw,
+                                                 options.constraints.sigma_odo,
+                                                 fej_ptr);
+        return {model.y, model.H};
+      };
+      AuditModel odo_analytic = EvaluateModel(record.state, odo_builder);
+      MatrixXd odo_numeric = ComputeNumericalJacobian(record.state, fej_ptr, eps, odo_builder);
+      auto odo_block_errors = ComputeBlockErrors(summary.dataset, "ODO", sample.t_state,
                                                  sample.speed_h,
                                                  sample.yaw_rate_rad_s * kRadToDeg,
                                                  odo_analytic.H, odo_numeric,
+                                                 BuildFocusBlocks("ODO"),
                                                  state_names);
+      auto odo_column_errors = ComputeColumnErrors(summary.dataset, "ODO", sample.t_state,
+                                                   sample.speed_h,
+                                                   sample.yaw_rate_rad_s * kRadToDeg,
+                                                   odo_analytic.H, odo_numeric,
+                                                   state_names);
+      summary.block_errors.insert(summary.block_errors.end(),
+                                  odo_block_errors.begin(), odo_block_errors.end());
+      summary.column_errors.insert(summary.column_errors.end(),
+                                   odo_column_errors.begin(), odo_column_errors.end());
+    }
+  }
+
+  vector<AuditSample> gnss_pos_samples = SelectGnssPositionSamples(
+      dataset, records, options.gating.time_tolerance, 5, 20.0);
+  summary.samples.insert(summary.samples.end(), gnss_pos_samples.begin(), gnss_pos_samples.end());
+
+  for (const auto &sample : gnss_pos_samples) {
+    const SolRecord &record = records.at(sample.record_idx);
+    Vector3d gnss_pos_ecef = Vector3d::Zero();
+    Vector3d gnss_pos_std = Vector3d::Zero();
+    if (!ComputeGnssPositionMeasurementAtIndex(dataset, options.noise, sample.meas_idx,
+                                               sample.t_state, gnss_pos_ecef,
+                                               gnss_pos_std)) {
+      throw runtime_error("failed to reconstruct GNSS_POS measurement for idx=" +
+                          to_string(sample.meas_idx));
+    }
+
+    auto gnss_pos_builder = [&](const State &state) -> AuditModel {
+      auto model = MeasModels::ComputeGnssPositionModel(state, gnss_pos_ecef,
+                                                        gnss_pos_std, fej_ptr);
+      return {model.y, model.H};
+    };
+
+    AuditModel gnss_pos_analytic = EvaluateModel(record.state, gnss_pos_builder);
+    MatrixXd gnss_pos_numeric = ComputeNumericalJacobian(record.state, fej_ptr, eps,
+                                                         gnss_pos_builder);
+    auto gnss_pos_block_errors = ComputeBlockErrors(summary.dataset, "GNSS_POS",
+                                                    sample.t_state, sample.speed_h,
+                                                    sample.yaw_rate_rad_s * kRadToDeg,
+                                                    gnss_pos_analytic.H,
+                                                    gnss_pos_numeric,
+                                                    BuildFocusBlocks("GNSS_POS"),
+                                                    state_names);
+    auto gnss_pos_column_errors = ComputeColumnErrors(summary.dataset, "GNSS_POS",
+                                                      sample.t_state, sample.speed_h,
+                                                      sample.yaw_rate_rad_s * kRadToDeg,
+                                                      gnss_pos_analytic.H,
+                                                      gnss_pos_numeric,
+                                                      state_names);
     summary.block_errors.insert(summary.block_errors.end(),
-                                odo_block_errors.begin(), odo_block_errors.end());
+                                gnss_pos_block_errors.begin(),
+                                gnss_pos_block_errors.end());
     summary.column_errors.insert(summary.column_errors.end(),
-                                 odo_column_errors.begin(), odo_column_errors.end());
+                                 gnss_pos_column_errors.begin(),
+                                 gnss_pos_column_errors.end());
   }
 
   vector<AuditSample> gnss_vel_samples = SelectGnssVelocitySamples(
@@ -1232,78 +1332,80 @@ AuditSummary RunAuditForConfig(const string &config_path,
                         config_path);
   }
 
-  FusionDebugCapture debug_capture;
-  debug_capture.capture_last_gnss_before_split = true;
-  RunFusion(options, dataset, x0, P0, &debug_capture);
+  if (options.gnss_schedule.enabled) {
+    FusionDebugCapture debug_capture;
+    debug_capture.capture_last_gnss_before_split = true;
+    RunFusion(options, dataset, x0, P0, &debug_capture);
 
-  if (!debug_capture.gnss_split_cov.valid) {
-    throw runtime_error("failed to capture GNSS split covariance for " + config_path);
+    if (!debug_capture.gnss_split_cov.valid) {
+      throw runtime_error("failed to capture GNSS split covariance for " + config_path);
+    }
+    summary.split_cov_valid = true;
+    summary.split_cov_tag = debug_capture.gnss_split_cov.tag;
+    summary.split_cov_t_meas = debug_capture.gnss_split_cov.t_meas;
+    summary.split_cov_t_state = debug_capture.gnss_split_cov.t_state;
+    summary.split_cov_att_bgz = debug_capture.gnss_split_cov.P_att_bgz;
+    summary.split_corr_att_bgz = debug_capture.gnss_split_cov.corr_att_bgz;
+    summary.split_att_var = debug_capture.gnss_split_cov.att_var;
+    summary.split_bgz_var = debug_capture.gnss_split_cov.bgz_var;
+
+    if (!debug_capture.reset_consistency.valid) {
+      throw runtime_error("failed to capture reset consistency snapshot for " + config_path);
+    }
+    summary.reset_consistency_valid = true;
+    summary.reset_tag = debug_capture.reset_consistency.tag;
+    summary.reset_t_meas = debug_capture.reset_consistency.t_meas;
+    summary.reset_t_state = debug_capture.reset_consistency.t_state;
+    summary.reset_floor_applied =
+        debug_capture.reset_consistency.covariance_floor_applied;
+
+    Matrix<double, kStateDim, 1> dx_reset = debug_capture.reset_consistency.dx;
+    Matrix<double, kStateDim, kStateDim> P_tilde =
+        debug_capture.reset_consistency.P_tilde;
+    Matrix<double, kStateDim, kStateDim> P_after_reset =
+        debug_capture.reset_consistency.P_after_reset;
+    Matrix<double, kStateDim, kStateDim> Gamma =
+        BuildTrueInEkfResetGammaFromDx(dx_reset);
+    Matrix<double, kStateDim, kStateDim> P_expected =
+        Gamma * P_tilde * Gamma.transpose();
+    P_expected = 0.5 * (P_expected + P_expected.transpose());
+
+    Matrix<double, kStateDim, kStateDim> diff = P_after_reset - P_expected;
+    summary.reset_expected_norm = P_expected.norm();
+    summary.reset_actual_norm = P_after_reset.norm();
+    summary.reset_diff_norm = diff.norm();
+    double denom = max({1e-12, summary.reset_expected_norm, summary.reset_actual_norm});
+    summary.reset_rel_fro = summary.reset_diff_norm / denom;
+    Eigen::Index worst_row = -1;
+    Eigen::Index worst_col = -1;
+    summary.reset_max_abs = diff.cwiseAbs().maxCoeff(&worst_row, &worst_col);
+    summary.reset_worst_row = static_cast<int>(worst_row);
+    summary.reset_worst_col = static_cast<int>(worst_col);
+
+    fs::path p_tilde_path = outdir / (summary.dataset + "_reset_p_tilde.txt");
+    fs::path p_expected_path = outdir / (summary.dataset + "_reset_p_expected.txt");
+    fs::path p_after_reset_path = outdir / (summary.dataset + "_reset_p_after_reset.txt");
+    fs::path dx_path = outdir / (summary.dataset + "_reset_dx.txt");
+    SaveResetAuditMatrix(p_tilde_path, P_tilde, "P_tilde");
+    SaveResetAuditMatrix(p_expected_path, P_expected, "P_expected");
+    SaveResetAuditMatrix(p_after_reset_path, P_after_reset, "P_after_reset");
+    SaveResetAuditMatrix(dx_path, dx_reset, "dx_reset");
+    summary.reset_p_tilde_path = p_tilde_path.string();
+    summary.reset_p_expected_path = p_expected_path.string();
+    summary.reset_p_after_reset_path = p_after_reset_path.string();
+    summary.reset_dx_path = dx_path.string();
+
+    cout << "[AuditSplitCov] dataset=" << summary.dataset
+         << " t_meas=" << summary.split_cov_t_meas
+         << " P_att_bgz=" << summary.split_cov_att_bgz.transpose()
+         << " corr_att_bgz=" << summary.split_corr_att_bgz.transpose() << "\n";
+    cout << "[AuditReset] dataset=" << summary.dataset
+         << " t_meas=" << summary.reset_t_meas
+         << " rel_fro=" << summary.reset_rel_fro
+         << " max_abs=" << summary.reset_max_abs
+         << " floor_after_reset="
+         << (summary.reset_floor_applied ? "ON" : "OFF") << "\n";
   }
-  summary.split_cov_valid = true;
-  summary.split_cov_tag = debug_capture.gnss_split_cov.tag;
-  summary.split_cov_t_meas = debug_capture.gnss_split_cov.t_meas;
-  summary.split_cov_t_state = debug_capture.gnss_split_cov.t_state;
-  summary.split_cov_att_bgz = debug_capture.gnss_split_cov.P_att_bgz;
-  summary.split_corr_att_bgz = debug_capture.gnss_split_cov.corr_att_bgz;
-  summary.split_att_var = debug_capture.gnss_split_cov.att_var;
-  summary.split_bgz_var = debug_capture.gnss_split_cov.bgz_var;
-
-  if (!debug_capture.reset_consistency.valid) {
-    throw runtime_error("failed to capture reset consistency snapshot for " + config_path);
-  }
-  summary.reset_consistency_valid = true;
-  summary.reset_tag = debug_capture.reset_consistency.tag;
-  summary.reset_t_meas = debug_capture.reset_consistency.t_meas;
-  summary.reset_t_state = debug_capture.reset_consistency.t_state;
-  summary.reset_floor_applied =
-      debug_capture.reset_consistency.covariance_floor_applied;
-
-  Matrix<double, kStateDim, 1> dx_reset = debug_capture.reset_consistency.dx;
-  Matrix<double, kStateDim, kStateDim> P_tilde =
-      debug_capture.reset_consistency.P_tilde;
-  Matrix<double, kStateDim, kStateDim> P_after_reset =
-      debug_capture.reset_consistency.P_after_reset;
-  Matrix<double, kStateDim, kStateDim> Gamma =
-      BuildTrueInEkfResetGammaFromDx(dx_reset);
-  Matrix<double, kStateDim, kStateDim> P_expected =
-      Gamma * P_tilde * Gamma.transpose();
-  P_expected = 0.5 * (P_expected + P_expected.transpose());
-
-  Matrix<double, kStateDim, kStateDim> diff = P_after_reset - P_expected;
-  summary.reset_expected_norm = P_expected.norm();
-  summary.reset_actual_norm = P_after_reset.norm();
-  summary.reset_diff_norm = diff.norm();
-  double denom = max({1e-12, summary.reset_expected_norm, summary.reset_actual_norm});
-  summary.reset_rel_fro = summary.reset_diff_norm / denom;
-  Eigen::Index worst_row = -1;
-  Eigen::Index worst_col = -1;
-  summary.reset_max_abs = diff.cwiseAbs().maxCoeff(&worst_row, &worst_col);
-  summary.reset_worst_row = static_cast<int>(worst_row);
-  summary.reset_worst_col = static_cast<int>(worst_col);
-
-  fs::path p_tilde_path = outdir / (summary.dataset + "_reset_p_tilde.txt");
-  fs::path p_expected_path = outdir / (summary.dataset + "_reset_p_expected.txt");
-  fs::path p_after_reset_path = outdir / (summary.dataset + "_reset_p_after_reset.txt");
-  fs::path dx_path = outdir / (summary.dataset + "_reset_dx.txt");
-  SaveResetAuditMatrix(p_tilde_path, P_tilde, "P_tilde");
-  SaveResetAuditMatrix(p_expected_path, P_expected, "P_expected");
-  SaveResetAuditMatrix(p_after_reset_path, P_after_reset, "P_after_reset");
-  SaveResetAuditMatrix(dx_path, dx_reset, "dx_reset");
-  summary.reset_p_tilde_path = p_tilde_path.string();
-  summary.reset_p_expected_path = p_expected_path.string();
-  summary.reset_p_after_reset_path = p_after_reset_path.string();
-  summary.reset_dx_path = dx_path.string();
-
-  cout << "[AuditSplitCov] dataset=" << summary.dataset
-       << " t_meas=" << summary.split_cov_t_meas
-       << " P_att_bgz=" << summary.split_cov_att_bgz.transpose()
-       << " corr_att_bgz=" << summary.split_corr_att_bgz.transpose() << "\n";
-  cout << "[AuditReset] dataset=" << summary.dataset
-       << " t_meas=" << summary.reset_t_meas
-       << " rel_fro=" << summary.reset_rel_fro
-       << " max_abs=" << summary.reset_max_abs
-       << " floor_after_reset="
-       << (summary.reset_floor_applied ? "ON" : "OFF") << "\n";
 
   return summary;
 }

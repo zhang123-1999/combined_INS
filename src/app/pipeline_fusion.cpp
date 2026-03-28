@@ -2,9 +2,14 @@
 #include "app/fusion.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cctype>
 #include <cmath>
-#include <iostream>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -21,6 +26,51 @@ namespace {
 
 constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+constexpr double kTruthAnchorPosVar = 1.0e-12;
+constexpr double kTruthAnchorVelVar = 1.0e-12;
+constexpr double kTruthAnchorAttVar = 1.0e-14;
+using SteadyClock = std::chrono::steady_clock;
+
+double DurationSeconds(const SteadyClock::duration &duration) {
+  return std::chrono::duration_cast<std::chrono::duration<double>>(duration)
+      .count();
+}
+
+bool IsPerfDebugEnabledFromEnv() {
+  const char *env = std::getenv("UWB_PERF_DEBUG");
+  if (env == nullptr) {
+    return false;
+  }
+  string value(env);
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return !(value.empty() || value == "0" || value == "false" ||
+           value == "off" || value == "no");
+}
+
+struct FusionPerfStats {
+  bool enabled = false;
+  size_t progress_stride = 2000;
+  size_t imu_steps = 0;
+  size_t gnss_exact_calls = 0;
+  size_t gnss_update_calls = 0;
+  size_t gnss_samples = 0;
+  size_t split_predict_count = 0;
+  size_t align_curr_predict_count = 0;
+  size_t tail_predict_count = 0;
+  size_t direct_predict_count = 0;
+  double predict_s = 0.0;
+  double gnss_exact_s = 0.0;
+  double gnss_update_s = 0.0;
+  double zupt_s = 0.0;
+  double gravity_diag_s = 0.0;
+  double uwb_s = 0.0;
+  double step_diag_s = 0.0;
+  double diag_write_s = 0.0;
+  SteadyClock::time_point wall_start = SteadyClock::time_point{};
+};
 
 struct ConstraintUpdateStats {
   int seen = 0;
@@ -32,6 +82,165 @@ struct ConstraintUpdateStats {
   double robust_weight_sum = 0.0;
   double noise_scale_sum = 0.0;
 };
+
+enum class NhcAdmissionVelocitySource {
+  kBody,
+  kWheelBody,
+  kVehicle,
+};
+
+struct NhcAdmissionKinematics {
+  Vector3d v_b = Vector3d::Zero();
+  Vector3d v_wheel_b = Vector3d::Zero();
+  Vector3d v_v = Vector3d::Zero();
+};
+
+struct NhcAdmissionDecision {
+  bool accept = true;
+  bool below_forward_speed = false;
+  bool exceed_lateral_vertical_limit = false;
+};
+
+NhcAdmissionVelocitySource ResolveNhcAdmissionVelocitySource(
+    const ConstraintConfig &cfg) {
+  if (cfg.nhc_admission_velocity_source == "v_wheel_b") {
+    return NhcAdmissionVelocitySource::kWheelBody;
+  }
+  if (cfg.nhc_admission_velocity_source == "v_v") {
+    return NhcAdmissionVelocitySource::kVehicle;
+  }
+  return NhcAdmissionVelocitySource::kBody;
+}
+
+const char *NhcAdmissionVelocitySourceName(
+    NhcAdmissionVelocitySource source) {
+  switch (source) {
+    case NhcAdmissionVelocitySource::kWheelBody:
+      return "v_wheel_b";
+    case NhcAdmissionVelocitySource::kVehicle:
+      return "v_v";
+    case NhcAdmissionVelocitySource::kBody:
+    default:
+      return "v_b";
+  }
+}
+
+NhcAdmissionKinematics ComputeNhcAdmissionKinematics(
+    const State &state, const Matrix3d &C_b_v,
+    const Vector3d &omega_ib_b_raw) {
+  NhcAdmissionKinematics kin;
+  Llh llh = EcefToLlh(state.p);
+  Matrix3d R_ne = RotNedToEcef(llh);
+  Matrix3d C_bn = R_ne.transpose() * QuatToRot(state.q);
+  Vector3d v_ned = R_ne.transpose() * state.v;
+  kin.v_b = C_bn.transpose() * v_ned;
+
+  Vector3d omega_ie_n = OmegaIeNed(llh.lat);
+  Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
+  Vector3d omega_in_n = omega_ie_n + omega_en_n;
+  Vector3d omega_in_b = C_bn.transpose() * omega_in_n;
+  Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
+  Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
+  Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
+  Vector3d omega_nb_b = omega_ib_corr - omega_in_b;
+
+  kin.v_wheel_b = kin.v_b + omega_nb_b.cross(state.lever_arm);
+  kin.v_v = C_b_v * kin.v_wheel_b;
+  return kin;
+}
+
+NhcAdmissionDecision EvaluateNhcAdmissionDecision(const Vector3d &v_ref,
+                                                  const ConstraintConfig &cfg) {
+  NhcAdmissionDecision decision;
+  if (cfg.nhc_disable_below_forward_speed > 0.0) {
+    decision.below_forward_speed =
+        std::abs(v_ref.x()) < cfg.nhc_disable_below_forward_speed;
+  }
+  if (cfg.nhc_max_abs_v > 0.0) {
+    decision.exceed_lateral_vertical_limit =
+        std::abs(v_ref.y()) > cfg.nhc_max_abs_v ||
+        std::abs(v_ref.z()) > cfg.nhc_max_abs_v;
+  }
+  decision.accept = !decision.below_forward_speed &&
+                    !decision.exceed_lateral_vertical_limit;
+  return decision;
+}
+
+Vector3d SelectNhcAdmissionVelocity(const NhcAdmissionKinematics &kin,
+                                    NhcAdmissionVelocitySource source) {
+  switch (source) {
+    case NhcAdmissionVelocitySource::kWheelBody:
+      return kin.v_wheel_b;
+    case NhcAdmissionVelocitySource::kVehicle:
+      return kin.v_v;
+    case NhcAdmissionVelocitySource::kBody:
+    default:
+      return kin.v_b;
+  }
+}
+
+void LogNhcAdmissionSample(std::ofstream *file, double t,
+                           NhcAdmissionVelocitySource selected_source,
+                           const NhcAdmissionKinematics &kin,
+                           const ConstraintConfig &cfg,
+                           const NhcAdmissionDecision &decision_v_b,
+                           const NhcAdmissionDecision &decision_v_wheel_b,
+                           const NhcAdmissionDecision &decision_v_v) {
+  if (file == nullptr || !file->is_open()) {
+    return;
+  }
+  const NhcAdmissionDecision *selected_decision = &decision_v_b;
+  switch (selected_source) {
+    case NhcAdmissionVelocitySource::kWheelBody:
+      selected_decision = &decision_v_wheel_b;
+      break;
+    case NhcAdmissionVelocitySource::kVehicle:
+      selected_decision = &decision_v_v;
+      break;
+    case NhcAdmissionVelocitySource::kBody:
+    default:
+      break;
+  }
+  (*file) << t << ","
+          << NhcAdmissionVelocitySourceName(selected_source) << ","
+          << (selected_decision->accept ? 1 : 0) << ","
+          << (decision_v_b.accept ? 1 : 0) << ","
+          << (decision_v_wheel_b.accept ? 1 : 0) << ","
+          << (decision_v_v.accept ? 1 : 0) << ","
+          << (decision_v_b.below_forward_speed ? 1 : 0) << ","
+          << (decision_v_wheel_b.below_forward_speed ? 1 : 0) << ","
+          << (decision_v_v.below_forward_speed ? 1 : 0) << ","
+          << (decision_v_b.exceed_lateral_vertical_limit ? 1 : 0) << ","
+          << (decision_v_wheel_b.exceed_lateral_vertical_limit ? 1 : 0) << ","
+          << (decision_v_v.exceed_lateral_vertical_limit ? 1 : 0) << ","
+          << cfg.nhc_disable_below_forward_speed << ","
+          << cfg.nhc_max_abs_v << ","
+          << kin.v_b.x() << "," << kin.v_b.y() << "," << kin.v_b.z() << ","
+          << kin.v_wheel_b.x() << "," << kin.v_wheel_b.y() << ","
+          << kin.v_wheel_b.z() << ","
+          << kin.v_v.x() << "," << kin.v_v.y() << "," << kin.v_v.z()
+          << "\n";
+}
+
+void ApplyStateGainScaleToKalmanGain(MatrixXd &K,
+                                     const StateGainScale *gain_scale) {
+  if (gain_scale == nullptr || K.rows() != kStateDim) {
+    return;
+  }
+  for (int i = 0; i < kStateDim; ++i) {
+    K.row(i) *= (*gain_scale)[i];
+  }
+}
+
+void ApplyStateMeasurementGainScaleToKalmanGain(
+    MatrixXd &K, const StateMeasurementGainScale *gain_element_scale) {
+  if (gain_element_scale == nullptr ||
+      gain_element_scale->rows() != K.rows() ||
+      gain_element_scale->cols() != K.cols()) {
+    return;
+  }
+  K.array() *= gain_element_scale->array();
+}
 
 double InvNormCdf(double p) {
   // Peter J. Acklam's approximation (sufficient for gating quantiles)
@@ -140,6 +349,138 @@ double ComputeRobustWeight(const ConstraintConfig &cfg, double whitened_norm) {
   return std::clamp(w, cfg.robust_min_weight, 1.0);
 }
 
+bool ApplyRuntimeTruthAnchor(EskfEngine &engine, const TruthData &truth,
+                             const InitConfig &init, double t, int &cursor) {
+  Vector3d p_truth = Vector3d::Zero();
+  Vector3d v_truth = Vector3d::Zero();
+  Vector4d q_truth = Vector4d(1.0, 0.0, 0.0, 0.0);
+  if (!InterpolateTruthPva(truth, t, cursor, p_truth, v_truth, q_truth)) {
+    return false;
+  }
+
+  State anchored_state = engine.state();
+  Matrix<double, kStateDim, kStateDim> anchored_cov = engine.cov();
+  auto anchor_block = [&](int start_idx, double variance) {
+    for (int idx = start_idx; idx < start_idx + 3; ++idx) {
+      anchored_cov.row(idx).setZero();
+      anchored_cov.col(idx).setZero();
+      anchored_cov(idx, idx) = variance;
+    }
+  };
+  if (init.runtime_truth_anchor_position) {
+    anchored_state.p = p_truth;
+    anchor_block(StateIdx::kPos, kTruthAnchorPosVar);
+  }
+  if (init.runtime_truth_anchor_velocity) {
+    anchored_state.v = v_truth;
+    anchor_block(StateIdx::kVel, kTruthAnchorVelVar);
+  }
+  if (init.runtime_truth_anchor_attitude) {
+    anchored_state.q = q_truth;
+    anchor_block(StateIdx::kAtt, kTruthAnchorAttVar);
+  }
+
+  engine.OverrideStateAndCov(anchored_state, anchored_cov);
+  return true;
+}
+
+bool ApplyDebugSeedBeforeFirstNhc(EskfEngine &engine,
+                                  const ConstraintConfig &cfg,
+                                  bool &already_applied) {
+  if (already_applied) {
+    return false;
+  }
+
+  const double seed_mount_yaw_bgz_cov =
+      cfg.debug_seed_mount_yaw_bgz_cov_before_first_nhc;
+  const double seed_bg_z = cfg.debug_seed_bg_z_before_first_nhc;
+  const bool seed_bg_z_att_cov =
+      cfg.debug_seed_bg_z_att_cov_before_first_nhc.allFinite();
+  const bool seed_mount_yaw_bgz_cov_enabled =
+      std::isfinite(seed_mount_yaw_bgz_cov);
+  const bool seed_bg_z_enabled = std::isfinite(seed_bg_z);
+  if (!seed_mount_yaw_bgz_cov_enabled && !seed_bg_z_enabled &&
+      !seed_bg_z_att_cov) {
+    return false;
+  }
+
+  State seeded_state = engine.state();
+  Matrix<double, kStateDim, kStateDim> seeded_cov = engine.cov();
+  if (seed_mount_yaw_bgz_cov_enabled) {
+    seeded_cov(StateIdx::kMountYaw, StateIdx::kBg + 2) = seed_mount_yaw_bgz_cov;
+    seeded_cov(StateIdx::kBg + 2, StateIdx::kMountYaw) = seed_mount_yaw_bgz_cov;
+  }
+  if (seed_bg_z_att_cov) {
+    for (int axis = 0; axis < 3; ++axis) {
+      seeded_cov(StateIdx::kBg + 2, StateIdx::kAtt + axis) =
+          cfg.debug_seed_bg_z_att_cov_before_first_nhc(axis);
+      seeded_cov(StateIdx::kAtt + axis, StateIdx::kBg + 2) =
+          cfg.debug_seed_bg_z_att_cov_before_first_nhc(axis);
+    }
+  }
+  if (seed_bg_z_enabled) {
+    seeded_state.bg.z() = seed_bg_z;
+  }
+  engine.OverrideStateAndCov(seeded_state, seeded_cov);
+  already_applied = true;
+
+  const double mount_var = std::max(0.0, seeded_cov(StateIdx::kMountYaw, StateIdx::kMountYaw));
+  const double bg_var = std::max(0.0, seeded_cov(StateIdx::kBg + 2, StateIdx::kBg + 2));
+  double corr = 0.0;
+  if (seed_mount_yaw_bgz_cov_enabled && mount_var > 0.0 && bg_var > 0.0) {
+    corr = seed_mount_yaw_bgz_cov / std::sqrt(mount_var * bg_var);
+  }
+  cout << "[Debug] Seed before first NHC: "
+       << "P(mount_yaw,bg_z)=" << seed_mount_yaw_bgz_cov
+       << " corr=" << corr
+       << " bg_z=" << seed_bg_z
+       << " P(bg_z,att_xyz)="
+       << cfg.debug_seed_bg_z_att_cov_before_first_nhc.transpose() << "\n";
+  return true;
+}
+
+bool ApplyDebugResetBgzStateAndCov(EskfEngine &engine,
+                                   const ConstraintConfig &cfg,
+                                   double t,
+                                   double time_tolerance,
+                                   bool &already_applied) {
+  if (already_applied) {
+    return false;
+  }
+  if (!std::isfinite(cfg.debug_reset_bg_z_state_and_cov_after_time) ||
+      !std::isfinite(cfg.debug_reset_bg_z_value) ||
+      t + time_tolerance < cfg.debug_reset_bg_z_state_and_cov_after_time) {
+    return false;
+  }
+
+  State reset_state = engine.state();
+  Matrix<double, kStateDim, kStateDim> reset_cov = engine.cov();
+  const int bg_z_idx = StateIdx::kBg + 2;
+  const double bg_z_before = reset_state.bg.z();
+  const double bg_var_before = reset_cov(bg_z_idx, bg_z_idx);
+  double offdiag_energy = 0.0;
+  for (int idx = 0; idx < kStateDim; ++idx) {
+    if (idx == bg_z_idx) continue;
+    offdiag_energy += reset_cov(bg_z_idx, idx) * reset_cov(bg_z_idx, idx);
+    reset_cov(bg_z_idx, idx) = 0.0;
+    reset_cov(idx, bg_z_idx) = 0.0;
+  }
+  reset_cov(bg_z_idx, bg_z_idx) =
+      std::isfinite(bg_var_before) ? std::max(0.0, bg_var_before) : 0.0;
+  reset_state.bg.z() = cfg.debug_reset_bg_z_value;
+  engine.OverrideStateAndCov(reset_state, reset_cov);
+  already_applied = true;
+
+  cout << "[Debug] Mid-run bg_z reset applied at t=" << fixed
+       << setprecision(6) << t
+       << " target_t=" << cfg.debug_reset_bg_z_state_and_cov_after_time
+       << " bg_z_before=" << bg_z_before
+       << " bg_z_after=" << cfg.debug_reset_bg_z_value
+       << " bg_var=" << reset_cov(bg_z_idx, bg_z_idx)
+       << " cleared_cross_cov_norm=" << std::sqrt(offdiag_energy) << "\n";
+  return true;
+}
+
 void ValidateInEkfHSignConsistencyOrThrow(const FusionOptions &options,
                                           const State &seed_state,
                                           const Vector3d &mounting_base_rpy,
@@ -162,7 +503,7 @@ void ValidateInEkfHSignConsistencyOrThrow(const FusionOptions &options,
   Vector3d rpy(mounting_base_rpy.x(),
                mounting_base_rpy.y() + probe.mounting_pitch,
                mounting_base_rpy.z() + probe.mounting_yaw);
-  Matrix3d C_b_v = QuatToRot(RpyToQuat(rpy));
+  Matrix3d C_b_v = QuatToRot(RpyToQuat(rpy)).transpose();
 
   double sigma_gnss = (options.noise.sigma_gnss_pos > 0.0)
                           ? options.noise.sigma_gnss_pos
@@ -219,7 +560,10 @@ void ValidateInEkfHSignConsistencyOrThrow(const FusionOptions &options,
 
 bool IsWeakExcitation(const State &state, const ImuData &imu,
                       const ConstraintConfig &cfg) {
-  if (!cfg.freeze_extrinsics_when_weak_excitation || imu.dt <= 1e-9) {
+  if (!cfg.freeze_extrinsics_when_weak_excitation) {
+    return false;
+  }
+  if (imu.dt <= 1e-9) {
     return false;
   }
   Matrix3d Cbn = QuatToRot(state.q);
@@ -230,6 +574,96 @@ bool IsWeakExcitation(const State &state, const ImuData &imu,
   return std::abs(v_b.x()) < cfg.excitation_min_speed &&
          std::abs(omega.z()) < cfg.excitation_min_yaw_rate &&
          std::abs(acc.y()) < cfg.excitation_min_lateral_acc;
+}
+
+bool MeetsWeakExcitationThresholds(const State &state, const ImuData &imu,
+                                  const ConstraintConfig &cfg) {
+  if (imu.dt <= 1e-9) {
+    return false;
+  }
+  Matrix3d Cbn = QuatToRot(state.q);
+  Vector3d v_b = Cbn.transpose() * state.v;
+  Vector3d omega = imu.dtheta / imu.dt;
+  Vector3d acc = imu.dvel / imu.dt;
+
+  return std::abs(v_b.x()) < cfg.excitation_min_speed &&
+         std::abs(omega.z()) < cfg.excitation_min_yaw_rate &&
+         std::abs(acc.y()) < cfg.excitation_min_lateral_acc;
+}
+
+bool IsTimeInWindow(double t, double start_time, double end_time,
+                    double tol = 1.0e-6) {
+  return std::isfinite(start_time) && std::isfinite(end_time) &&
+         t >= start_time - tol && t <= end_time + tol;
+}
+
+struct BgzObservabilityGateInfo {
+  double forward_speed_abs = 0.0;
+  double yaw_rate_abs = 0.0;
+  double lateral_acc_abs = 0.0;
+  double gate_scale = 1.0;
+};
+
+BgzObservabilityGateInfo ComputeBgzObservabilityGateInfo(
+    const State &state, const ImuData &imu, const ConstraintConfig &cfg) {
+  BgzObservabilityGateInfo info;
+  if (imu.dt <= 1e-9) {
+    return info;
+  }
+
+  Matrix3d Cbn = QuatToRot(state.q);
+  Vector3d v_b = Cbn.transpose() * state.v;
+  Vector3d omega = imu.dtheta / imu.dt;
+  Vector3d acc = imu.dvel / imu.dt;
+  const double yaw_rate_min = cfg.bgz_gate_yaw_rate_min_deg_s * kDegToRad;
+
+  info.forward_speed_abs = std::abs(v_b.x());
+  info.yaw_rate_abs = std::abs(omega.z());
+  info.lateral_acc_abs = std::abs(acc.y());
+
+  const double speed_score = std::clamp(
+      info.forward_speed_abs / std::max(1e-12, cfg.bgz_gate_forward_speed_min),
+      0.0, 1.0);
+  const double yaw_score = std::clamp(
+      info.yaw_rate_abs / std::max(1e-12, yaw_rate_min), 0.0, 1.0);
+  const double lat_score = std::clamp(
+      info.lateral_acc_abs /
+          std::max(1e-12, cfg.bgz_gate_lateral_acc_min),
+      0.0, 1.0);
+  const double turn_score = std::max(yaw_score, lat_score);
+  const double raw_gate = speed_score * turn_score;
+  info.gate_scale =
+      std::clamp(std::max(cfg.bgz_gate_min_scale, raw_gate), 0.0, 1.0);
+  return info;
+}
+
+bool ApplyBgzCovarianceForgettingIfNeeded(EskfEngine &engine, const ImuData &imu,
+                                          const ConstraintConfig &cfg) {
+  if (!cfg.enable_bgz_covariance_forgetting || imu.dt <= 1e-9) {
+    return false;
+  }
+  const BgzObservabilityGateInfo gate =
+      ComputeBgzObservabilityGateInfo(engine.state(), imu, cfg);
+  if (gate.gate_scale >= 1.0 - 1e-12) {
+    return false;
+  }
+
+  const double tau = std::max(1e-12, cfg.bgz_cov_forgetting_tau_s);
+  const double decay = std::exp(-(1.0 - gate.gate_scale) * imu.dt / tau);
+  if (decay >= 1.0 - 1e-12) {
+    return false;
+  }
+
+  State state = engine.state();
+  Matrix<double, kStateDim, kStateDim> P = engine.cov();
+  const int bg_z_idx = StateIdx::kBg + 2;
+  for (int idx = 0; idx < kStateDim; ++idx) {
+    if (idx == bg_z_idx) continue;
+    P(bg_z_idx, idx) *= decay;
+    P(idx, bg_z_idx) *= decay;
+  }
+  engine.OverrideStateAndCov(state, P);
+  return true;
 }
 
 void ZeroExtrinsicSensitivity(MatrixXd &H, bool freeze_scale, bool freeze_mounting,
@@ -250,12 +684,26 @@ bool CorrectConstraintWithRobustness(EskfEngine &engine, const string &tag, doub
                                      const VectorXd &y, MatrixXd H, MatrixXd R,
                                      bool freeze_scale, bool freeze_mounting,
                                      bool freeze_lever, double nis_prob,
+                                     bool apply_bgz_observability_gate,
+                                     const StateMask *update_mask,
                                      DiagnosticsEngine &diag,
                                      ConstraintUpdateStats &stats) {
   ++stats.seen;
 
   if (IsWeakExcitation(engine.state(), imu, cfg)) {
     ZeroExtrinsicSensitivity(H, freeze_scale, freeze_mounting, freeze_lever);
+  }
+
+  StateGainScale bgz_gate_scale;
+  const StateGainScale *bgz_gate_scale_ptr = nullptr;
+  const BgzObservabilityGateInfo bgz_gate =
+      ComputeBgzObservabilityGateInfo(engine.state(), imu, cfg);
+  if (cfg.enable_bgz_observability_gate &&
+      apply_bgz_observability_gate &&
+      bgz_gate.gate_scale < 1.0 - 1e-12) {
+    bgz_gate_scale.fill(1.0);
+    bgz_gate_scale[StateIdx::kBg + 2] = bgz_gate.gate_scale;
+    bgz_gate_scale_ptr = &bgz_gate_scale;
   }
 
   // 先使用原始 R 做 NIS 门控，避免“先鲁棒放大 R 再门控”导致门控被削弱。
@@ -287,7 +735,8 @@ bool CorrectConstraintWithRobustness(EskfEngine &engine, const string &tag, doub
   double nis_update = 0.0;
   (void)ComputeNis(engine, H, R_eff, y, nis_update);
 
-  bool updated = diag.Correct(engine, tag, t, y, H, R_eff, nullptr);
+  bool updated = diag.Correct(engine, tag, t, y, H, R_eff, update_mask,
+                              bgz_gate_scale_ptr, nullptr);
   if (!updated) {
     ++stats.rejected_numeric;
     return false;
@@ -390,6 +839,9 @@ StateMask BuildStateMask(const StateAblationConfig &cfg) {
       mask[start + i] = false;
     }
   };
+  if (cfg.disable_accel_bias) {
+    disable_range(StateIdx::kBa, 3);
+  }
   if (cfg.disable_gyro_bias) {
     disable_range(StateIdx::kBg, 3);
   }
@@ -408,6 +860,12 @@ StateMask BuildStateMask(const StateAblationConfig &cfg) {
   if (cfg.disable_mounting_roll) {
     disable_range(StateIdx::kMountRoll, 1);
   }
+  if (cfg.disable_mounting_pitch) {
+    disable_range(StateIdx::kMountPitch, 1);
+  }
+  if (cfg.disable_mounting_yaw) {
+    disable_range(StateIdx::kMountYaw, 1);
+  }
   if (cfg.disable_odo_lever_arm) {
     disable_range(StateIdx::kLever, 3);
   }
@@ -416,6 +874,24 @@ StateMask BuildStateMask(const StateAblationConfig &cfg) {
   }
   if (cfg.disable_gnss_lever_z) {
     disable_range(StateIdx::kGnssLever + 2, 1);
+  }
+  return mask;
+}
+
+StateMask BuildGnssPosNonPositionMask() {
+  StateMask mask;
+  mask.fill(true);
+  for (int axis = 0; axis < 3; ++axis) {
+    mask[StateIdx::kPos + axis] = false;
+  }
+  return mask;
+}
+
+StateMask BuildGnssPosPositionOnlyMask() {
+  StateMask mask;
+  mask.fill(false);
+  for (int axis = 0; axis < 3; ++axis) {
+    mask[StateIdx::kPos + axis] = true;
   }
   return mask;
 }
@@ -431,6 +907,8 @@ StateAblationConfig MergeAblationConfig(const StateAblationConfig &base,
       out.disable_odo_lever_arm || extra.disable_odo_lever_arm;
   out.disable_odo_scale =
       out.disable_odo_scale || extra.disable_odo_scale;
+  out.disable_accel_bias =
+      out.disable_accel_bias || extra.disable_accel_bias;
   out.disable_gyro_bias =
       out.disable_gyro_bias || extra.disable_gyro_bias;
   out.disable_gyro_scale =
@@ -441,10 +919,18 @@ StateAblationConfig MergeAblationConfig(const StateAblationConfig &base,
       out.disable_mounting || extra.disable_mounting;
   out.disable_mounting_roll =
       out.disable_mounting_roll || extra.disable_mounting_roll;
+  out.disable_mounting_pitch =
+      out.disable_mounting_pitch || extra.disable_mounting_pitch;
+  out.disable_mounting_yaw =
+      out.disable_mounting_yaw || extra.disable_mounting_yaw;
   return out;
 }
 
 void ApplyAblationToNoise(NoiseParams &noise, const StateAblationConfig &cfg) {
+  if (cfg.disable_accel_bias) {
+    noise.sigma_ba = 0.0;
+    noise.sigma_ba_vec.setZero();
+  }
   if (cfg.disable_gyro_bias) {
     noise.sigma_bg = 0.0;
     noise.sigma_bg_vec.setZero();
@@ -465,8 +951,16 @@ void ApplyAblationToNoise(NoiseParams &noise, const StateAblationConfig &cfg) {
     noise.sigma_mounting_roll = 0.0;
     noise.sigma_mounting_pitch = 0.0;
     noise.sigma_mounting_yaw = 0.0;
-  } else if (cfg.disable_mounting_roll) {
-    noise.sigma_mounting_roll = 0.0;
+  } else {
+    if (cfg.disable_mounting_roll) {
+      noise.sigma_mounting_roll = 0.0;
+    }
+    if (cfg.disable_mounting_pitch) {
+      noise.sigma_mounting_pitch = 0.0;
+    }
+    if (cfg.disable_mounting_yaw) {
+      noise.sigma_mounting_yaw = 0.0;
+    }
   }
   if (cfg.disable_odo_lever_arm) {
     noise.sigma_lever_arm = 0.0;
@@ -480,6 +974,161 @@ void ApplyAblationToNoise(NoiseParams &noise, const StateAblationConfig &cfg) {
       noise.sigma_gnss_lever_arm_vec.z() = 0.0;
     }
   }
+}
+
+void ApplyRuntimeNoiseOverride(NoiseParams &noise,
+                               const RuntimeNoiseOverride &override) {
+  if (std::isfinite(override.sigma_acc)) {
+    noise.sigma_acc = override.sigma_acc;
+  }
+  if (std::isfinite(override.sigma_gyro)) {
+    noise.sigma_gyro = override.sigma_gyro;
+  }
+  if (std::isfinite(override.sigma_ba)) {
+    noise.sigma_ba = override.sigma_ba;
+  }
+  if (std::isfinite(override.sigma_bg)) {
+    noise.sigma_bg = override.sigma_bg;
+  }
+  if (std::isfinite(override.sigma_sg)) {
+    noise.sigma_sg = override.sigma_sg;
+  }
+  if (std::isfinite(override.sigma_sa)) {
+    noise.sigma_sa = override.sigma_sa;
+  }
+  if (override.sigma_ba_vec.allFinite()) {
+    noise.sigma_ba_vec = override.sigma_ba_vec;
+  }
+  if (override.sigma_bg_vec.allFinite()) {
+    noise.sigma_bg_vec = override.sigma_bg_vec;
+  }
+  if (override.sigma_sg_vec.allFinite()) {
+    noise.sigma_sg_vec = override.sigma_sg_vec;
+  }
+  if (override.sigma_sa_vec.allFinite()) {
+    noise.sigma_sa_vec = override.sigma_sa_vec;
+  }
+  if (std::isfinite(override.sigma_odo_scale)) {
+    noise.sigma_odo_scale = override.sigma_odo_scale;
+  }
+  if (std::isfinite(override.sigma_mounting)) {
+    noise.sigma_mounting = override.sigma_mounting;
+  }
+  if (std::isfinite(override.sigma_mounting_roll)) {
+    noise.sigma_mounting_roll = override.sigma_mounting_roll;
+  }
+  if (std::isfinite(override.sigma_mounting_pitch)) {
+    noise.sigma_mounting_pitch = override.sigma_mounting_pitch;
+  }
+  if (std::isfinite(override.sigma_mounting_yaw)) {
+    noise.sigma_mounting_yaw = override.sigma_mounting_yaw;
+  }
+  if (std::isfinite(override.sigma_lever_arm)) {
+    noise.sigma_lever_arm = override.sigma_lever_arm;
+  }
+  if (std::isfinite(override.sigma_gnss_lever_arm)) {
+    noise.sigma_gnss_lever_arm = override.sigma_gnss_lever_arm;
+  }
+  if (override.sigma_lever_arm_vec.allFinite()) {
+    noise.sigma_lever_arm_vec = override.sigma_lever_arm_vec;
+  }
+  if (override.sigma_gnss_lever_arm_vec.allFinite()) {
+    noise.sigma_gnss_lever_arm_vec = override.sigma_gnss_lever_arm_vec;
+  }
+  if (std::isfinite(override.sigma_uwb)) {
+    noise.sigma_uwb = override.sigma_uwb;
+  }
+  if (std::isfinite(override.sigma_gnss_pos)) {
+    noise.sigma_gnss_pos = override.sigma_gnss_pos;
+  }
+  if (std::isfinite(override.markov_corr_time)) {
+    noise.markov_corr_time = override.markov_corr_time;
+  }
+  if (override.has_disable_nominal_ba_bg_decay) {
+    noise.disable_nominal_ba_bg_decay = override.disable_nominal_ba_bg_decay;
+  }
+}
+
+ConstraintConfig ApplyRuntimeConstraintOverride(
+    const ConstraintConfig &base,
+    const RuntimeConstraintOverride &override) {
+  ConstraintConfig out = base;
+  if (override.has_enable_nhc) {
+    out.enable_nhc = override.enable_nhc;
+  }
+  if (override.has_enable_odo) {
+    out.enable_odo = override.enable_odo;
+  }
+  if (override.has_enable_covariance_floor) {
+    out.enable_covariance_floor = override.enable_covariance_floor;
+  }
+  if (override.has_enable_nis_gating) {
+    out.enable_nis_gating = override.enable_nis_gating;
+  }
+  if (override.has_odo_nis_gate_prob) {
+    out.odo_nis_gate_prob = override.odo_nis_gate_prob;
+  }
+  if (override.has_nhc_nis_gate_prob) {
+    out.nhc_nis_gate_prob = override.nhc_nis_gate_prob;
+  }
+  if (override.has_p_floor_odo_scale_var) {
+    out.p_floor_odo_scale_var = override.p_floor_odo_scale_var;
+  }
+  if (override.has_p_floor_lever_arm_vec) {
+    out.p_floor_lever_arm_vec = override.p_floor_lever_arm_vec;
+  }
+  if (override.has_p_floor_mounting_deg) {
+    out.p_floor_mounting_deg = override.p_floor_mounting_deg;
+  }
+  return out;
+}
+
+string ComputeEffectiveGnssPosUpdateMode(const FusionOptions &options,
+                                         double t_now) {
+  string effective = options.gnss_pos_update_mode;
+  for (const auto &phase : options.runtime_phases) {
+    if (!phase.enabled ||
+        !IsTimeInWindow(t_now, phase.start_time, phase.end_time,
+                        options.gating.time_tolerance)) {
+      continue;
+    }
+    if (phase.constraints.has_gnss_pos_update_mode) {
+      effective = phase.constraints.gnss_pos_update_mode;
+    }
+  }
+  return effective;
+}
+
+bool IsTimeInAnyWindow(double t, const vector<pair<double, double>> &windows,
+                       double tol) {
+  for (const auto &window : windows) {
+    if (t >= window.first - tol && t <= window.second + tol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int AdvanceTimestampIndexToTime(const VectorXd &timestamps, int &idx,
+                                double t_curr, double tol) {
+  const int n = static_cast<int>(timestamps.size());
+  const int start_idx = std::clamp(idx, 0, n);
+  idx = start_idx;
+  while (idx < n && timestamps(idx) <= t_curr + tol) {
+    ++idx;
+  }
+  return idx - start_idx;
+}
+
+int AdvanceMatrixTimeIndexToTime(const MatrixXd &data, int &idx, int time_col,
+                                 double time_offset, double t_curr, double tol) {
+  const int n = data.rows();
+  const int start_idx = std::clamp(idx, 0, n);
+  idx = start_idx;
+  while (idx < n && data(idx, time_col) + time_offset <= t_curr + tol) {
+    ++idx;
+  }
+  return idx - start_idx;
 }
 
 // ---------- UWB 调度辅助 ----------
@@ -555,8 +1204,13 @@ void RunNhcUpdate(EskfEngine &engine, const ImuData &imu,
                   const ConstraintConfig &cfg, const Vector3d &mounting_base_rpy,
                   bool zupt_ready, DiagnosticsEngine &diag, double t,
                   const FejManager *fej, ConstraintUpdateStats &stats,
-                  double &last_nhc_update_t, double nhc_min_interval) {
+                  double &last_nhc_update_t, double nhc_min_interval,
+                  std::ofstream *nhc_admission_log_file) {
   if (!cfg.enable_nhc || (cfg.enable_zupt && zupt_ready)) return;
+  if (IsTimeInWindow(t, cfg.debug_nhc_disable_start_time,
+                     cfg.debug_nhc_disable_end_time)) {
+    return;
+  }
   if (nhc_min_interval > 0.0 &&
       last_nhc_update_t > -1e17 &&
       (t - last_nhc_update_t) < nhc_min_interval) {
@@ -566,36 +1220,84 @@ void RunNhcUpdate(EskfEngine &engine, const ImuData &imu,
   double dt = imu.dt;
   if (dt <= 1e-9) return;
   const State &state = engine.state();
+  if (cfg.disable_nhc_when_weak_excitation &&
+      MeetsWeakExcitationThresholds(state, imu, cfg)) {
+    return;
+  }
 
-  // 体坐标系速度检查
-  Matrix3d Cbn = QuatToRot(state.q);
-  Vector3d v_b = Cbn.transpose() * state.v;
-  if (cfg.nhc_max_abs_v > 0.0 &&
-      (std::abs(v_b.y()) > cfg.nhc_max_abs_v ||
-       std::abs(v_b.z()) > cfg.nhc_max_abs_v)) {
+  Vector3d mounting_rpy(mounting_base_rpy.x(),
+                        mounting_base_rpy.y() + state.mounting_pitch,
+                        mounting_base_rpy.z() + state.mounting_yaw);
+  Matrix3d C_b_v = QuatToRot(RpyToQuat(mounting_rpy)).transpose();
+  Vector3d omega_ib_b_raw = imu.dtheta / dt;
+  const NhcAdmissionKinematics admission_kin =
+      ComputeNhcAdmissionKinematics(state, C_b_v, omega_ib_b_raw);
+  const NhcAdmissionDecision decision_v_b =
+      EvaluateNhcAdmissionDecision(admission_kin.v_b, cfg);
+  const NhcAdmissionDecision decision_v_wheel_b =
+      EvaluateNhcAdmissionDecision(admission_kin.v_wheel_b, cfg);
+  const NhcAdmissionDecision decision_v_v =
+      EvaluateNhcAdmissionDecision(admission_kin.v_v, cfg);
+  const NhcAdmissionVelocitySource selected_source =
+      ResolveNhcAdmissionVelocitySource(cfg);
+  const Vector3d selected_velocity =
+      SelectNhcAdmissionVelocity(admission_kin, selected_source);
+
+  LogNhcAdmissionSample(nhc_admission_log_file, t, selected_source,
+                        admission_kin, cfg, decision_v_b,
+                        decision_v_wheel_b, decision_v_v);
+
+  const NhcAdmissionDecision *selected_decision = &decision_v_b;
+  switch (selected_source) {
+    case NhcAdmissionVelocitySource::kWheelBody:
+      selected_decision = &decision_v_wheel_b;
+      break;
+    case NhcAdmissionVelocitySource::kVehicle:
+      selected_decision = &decision_v_v;
+      break;
+    case NhcAdmissionVelocitySource::kBody:
+    default:
+      break;
+  }
+
+  if (selected_decision->below_forward_speed) {
     if (diag.enabled() && !diag.nhc_skip_warned()) {
       cout << "[Warn] NHC skipped at t=" << t
-           << " |v_b.y|=" << std::abs(v_b.y())
-           << " |v_b.z|=" << std::abs(v_b.z()) << "\n";
+           << " source=" << NhcAdmissionVelocitySourceName(selected_source)
+           << " |vx|=" << std::abs(selected_velocity.x())
+           << " below forward-speed threshold="
+           << cfg.nhc_disable_below_forward_speed << "\n";
+    }
+    diag.set_nhc_skip_warned(true);
+    return;
+  }
+  if (selected_decision->exceed_lateral_vertical_limit) {
+    if (diag.enabled() && !diag.nhc_skip_warned()) {
+      cout << "[Warn] NHC skipped at t=" << t
+           << " source=" << NhcAdmissionVelocitySourceName(selected_source)
+           << " |vy|=" << std::abs(selected_velocity.y())
+           << " |vz|=" << std::abs(selected_velocity.z()) << "\n";
     }
     diag.set_nhc_skip_warned(true);
     return;
   }
   diag.set_nhc_skip_warned(false);
 
-  // 动态计算 C_b_v
-  Vector3d mounting_rpy(mounting_base_rpy.x(),
-                        mounting_base_rpy.y() + state.mounting_pitch,
-                        mounting_base_rpy.z() + state.mounting_yaw);
-  Matrix3d C_b_v = QuatToRot(RpyToQuat(mounting_rpy));
-
-  Vector3d omega_ib_b_raw = imu.dtheta / dt;
   auto model = MeasModels::ComputeNhcModel(state, C_b_v, omega_ib_b_raw,
                                             cfg.sigma_nhc_y, cfg.sigma_nhc_z,
                                             fej);
+  StateMask nhc_update_mask;
+  const StateMask *nhc_update_mask_ptr = nullptr;
+  if (cfg.debug_nhc_disable_bgz_state_update) {
+    nhc_update_mask.fill(true);
+    nhc_update_mask[StateIdx::kBg + 2] = false;
+    nhc_update_mask_ptr = &nhc_update_mask;
+  }
   if (CorrectConstraintWithRobustness(engine, "NHC", t, imu, cfg, model.y, model.H,
                                       model.R, false, true, true,
-                                      cfg.nhc_nis_gate_prob, diag, stats)) {
+                                      cfg.nhc_nis_gate_prob, cfg.bgz_gate_apply_to_nhc,
+                                      nhc_update_mask_ptr,
+                                      diag, stats)) {
     last_nhc_update_t = t;
   }
 }
@@ -632,6 +1334,12 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
       }
     }
     double t_meas = interpolated_to_curr ? t_curr : t_odo;
+    if (IsTimeInWindow(t_meas, cfg.debug_odo_disable_start_time,
+                       cfg.debug_odo_disable_end_time,
+                       gating.time_tolerance)) {
+      ++odo_idx;
+      continue;
+    }
     if (odo_min_interval > 0.0 &&
         last_odo_update_t > -1e17 &&
         (t_meas - last_odo_update_t) < odo_min_interval) {
@@ -642,6 +1350,11 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
 
     // 角速度（使用当前 IMU 数据）
     const State &state = engine.state();
+    if (cfg.disable_odo_when_weak_excitation &&
+        MeetsWeakExcitationThresholds(state, imu_curr, cfg)) {
+      ++odo_idx;
+      continue;
+    }
     Vector3d omega_ib_b_raw = Vector3d::Zero();
     if (imu_curr.dt > 1e-9)
       omega_ib_b_raw = imu_curr.dtheta / imu_curr.dt;
@@ -650,14 +1363,26 @@ double RunOdoUpdate(EskfEngine &engine, const Dataset &dataset,
     Vector3d rpy(mounting_base_rpy.x(),
                  mounting_base_rpy.y() + state.mounting_pitch,
                  mounting_base_rpy.z() + state.mounting_yaw);
-    Matrix3d C_b_v = QuatToRot(RpyToQuat(rpy));
+    Matrix3d C_b_v = QuatToRot(RpyToQuat(rpy)).transpose();
     auto model = MeasModels::ComputeOdoModel(state, odo_vel,
                                               C_b_v, omega_ib_b_raw,
                                               cfg.sigma_odo, fej);
+    if (cfg.debug_odo_disable_bgz_jacobian &&
+        model.H.cols() > StateIdx::kBg + 2) {
+      model.H(0, StateIdx::kBg + 2) = 0.0;
+    }
+    StateMask odo_update_mask;
+    const StateMask *odo_update_mask_ptr = nullptr;
+    if (cfg.debug_odo_disable_bgz_state_update) {
+      odo_update_mask.fill(true);
+      odo_update_mask[StateIdx::kBg + 2] = false;
+      odo_update_mask_ptr = &odo_update_mask;
+    }
     if (CorrectConstraintWithRobustness(engine, "ODO", t_meas, imu_curr, cfg,
                                         model.y, model.H, model.R,
                                         true, true, true, cfg.odo_nis_gate_prob,
-                                        diag, stats)) {
+                                        cfg.bgz_gate_apply_to_odo,
+                                        odo_update_mask_ptr, diag, stats)) {
       last_odo_update_t = t_meas;
     }
     ++odo_idx;
@@ -724,84 +1449,225 @@ void RunUwbUpdate(EskfEngine &engine, const Dataset &dataset,
   }
 }
 
+bool SplitImuMeasurementAtTimestamp(const ImuData &imu_prev,
+                                    const ImuData &imu_curr,
+                                    double timestamp,
+                                    ImuData &mid_imu,
+                                    ImuData &tail_imu) {
+  const double interval = imu_curr.t - imu_prev.t;
+  if (!(interval > 1.0e-9) ||
+      timestamp <= imu_prev.t ||
+      timestamp >= imu_curr.t) {
+    return false;
+  }
+
+  const double lambda = (timestamp - imu_prev.t) / interval;
+  if (!(lambda > 0.0 && lambda < 1.0)) {
+    return false;
+  }
+
+  mid_imu = imu_curr;
+  mid_imu.t = timestamp;
+  mid_imu.dtheta = imu_curr.dtheta * lambda;
+  mid_imu.dvel = imu_curr.dvel * lambda;
+  mid_imu.dt = timestamp - imu_prev.t;
+
+  tail_imu = imu_curr;
+  tail_imu.dtheta = imu_curr.dtheta - mid_imu.dtheta;
+  tail_imu.dvel = imu_curr.dvel - mid_imu.dvel;
+  tail_imu.dt = imu_curr.dt - mid_imu.dt;
+  return tail_imu.dt > 1.0e-9;
+}
+
 /**
  * 执行GNSS位置和速度更新。
- * 位置：用GNSS速度对量测做时间外推对齐（z_aligned = z(t_gnss) + v * Δt，Δt = t_curr - t_gnss）
- * 速度：在相邻两个GNSS帧之间线性内插到t_curr（类似ODO处理方式）
- * 噪声：位置和速度均使用各向异性R矩阵（NED各向分别的sigma）
+ * 该函数假设当前引擎状态已经位于 t_curr，并在该时刻执行 GNSS 更新。
+ * 精确的“先插值 IMU 到 GNSS 时刻、再更新、再传播剩余 IMU”时序
+ * 由 PredictCurrentIntervalWithExactGnss 在外层调度。
  */
-void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
+bool RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
                    int &gnss_idx, double t_curr,
                    const FusionOptions &options,
                    DiagnosticsEngine &diag,
                    const ImuData *imu_curr,
                    const FejManager *fej,
                    double gnss_split_t,
-                   FusionDebugCapture *debug_capture) {
-  if (dataset.gnss.timestamps.size() == 0) return;
-  constexpr double kSigmaPosMin = 1e-4;
+                   FusionDebugCapture *debug_capture,
+                   FusionPerfStats *perf_stats) {
+  if (dataset.gnss.timestamps.size() == 0) return false;
   constexpr double kSigmaVelMin = 1e-4;
+  bool any_gnss_updated = false;
+  const int gnss_idx_begin = gnss_idx;
+  const SteadyClock::time_point call_start =
+      (perf_stats != nullptr && perf_stats->enabled) ? SteadyClock::now()
+                                                     : SteadyClock::time_point{};
 
   while (gnss_idx < (int)dataset.gnss.timestamps.size()) {
     double t_gnss = dataset.gnss.timestamps(gnss_idx);
     if (t_gnss > t_curr + options.gating.time_tolerance) break;
+    if (perf_stats != nullptr && perf_stats->enabled) {
+      cerr << "[Perf][GNSS] begin idx=" << gnss_idx
+           << " t_gnss=" << fixed << setprecision(6) << t_gnss
+           << " t_curr=" << t_curr << endl;
+    }
 
     // 时间对齐量：t_curr - t_gnss，通常 ≤ 一个 IMU 步长 (~5ms)
     // 对 RTK FIX（mm级精度）：5m/s × 5ms = 2.5cm 系统偏差，需对齐
     double dt_align = t_curr - t_gnss;
 
-    // 获取GNSS位置和各向精度（NED sigma，单位 m）
-    Vector3d gnss_pos = dataset.gnss.positions.row(gnss_idx).transpose();
-    Vector3d gnss_std = dataset.gnss.std.row(gnss_idx).transpose();
-
-    // GNSS 各向 sigma 处理：
-    // 1) 优先使用数据文件中的逐历元标准差；
-    // 2) 若文件值缺失/非法，回退到配置 sigma_gnss_pos；
-    // 3) 统一施加数值稳定下限，避免 R 退化。
-    double sigma_pos_fallback = options.noise.sigma_gnss_pos > 0.0
-                                    ? options.noise.sigma_gnss_pos
-                                    : 1.0;
-    for (int k = 0; k < 3; ++k) {
-      if (!std::isfinite(gnss_std(k)) || gnss_std(k) <= 0.0) {
-        gnss_std(k) = sigma_pos_fallback;
+    Vector3d gnss_pos = Vector3d::Zero();
+    Vector3d gnss_std = Vector3d::Zero();
+    if (!ComputeAlignedGnssPositionMeasurement(dataset, options.noise, gnss_idx,
+                                               t_curr, gnss_pos, gnss_std)) {
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        cerr << "[Perf][GNSS] skip_invalid_measurement idx=" << gnss_idx
+             << " t_gnss=" << t_gnss << endl;
       }
-      if (gnss_std(k) < kSigmaPosMin) {
-        gnss_std(k) = kSigmaPosMin;
-      }
+      ++gnss_idx;
+      continue;
     }
-
-    bool has_vel =
-        (dataset.gnss.velocities.rows() == dataset.gnss.timestamps.size() &&
-         dataset.gnss.vel_std.rows() == dataset.gnss.timestamps.size());
-
-    // 位置时间外推对齐：z_aligned = gnss_pos(t_gnss) + v_ecef * dt_align
-    if (dt_align > 1e-9 && has_vel) {
-      Vector3d vel_ecef = dataset.gnss.velocities.row(gnss_idx).transpose();
-      gnss_pos += vel_ecef * dt_align;
-    }
+    const bool has_gnss_vel_data = HasGnssVelocityData(dataset);
 
     // 构建GNSS位置量测模型（各向异性R）
+    const SteadyClock::time_point model_start =
+        (perf_stats != nullptr && perf_stats->enabled) ? SteadyClock::now()
+                                                       : SteadyClock::time_point{};
     auto model = MeasModels::ComputeGnssPositionModel(engine.state(), gnss_pos,
                                                       gnss_std, fej);
+    const double model_s =
+        (perf_stats != nullptr && perf_stats->enabled)
+            ? DurationSeconds(SteadyClock::now() - model_start)
+            : 0.0;
 
-    // 诊断日志：观测姿态列范数。
+    double omega_z_deg_s = 0.0;
+    if (imu_curr != nullptr && imu_curr->dt > 1.0e-9) {
+      omega_z_deg_s =
+          (imu_curr->dtheta.z() / imu_curr->dt - engine.state().bg.z()) *
+          (180.0 / 3.14159265358979323846);
+    }
+    double effective_pos_gain_scale = options.gnss_pos_position_gain_scale;
+    double effective_lgy_from_y_gain_scale =
+        options.gnss_pos_lgy_from_y_gain_scale;
+    if (options.gnss_pos_turn_rate_threshold_deg_s > 0.0) {
+      const bool strong_turn =
+          std::abs(omega_z_deg_s) >= options.gnss_pos_turn_rate_threshold_deg_s;
+      if (strong_turn && omega_z_deg_s > 0.0 &&
+          options.gnss_pos_positive_turn_position_gain_scale >= 0.0) {
+        effective_pos_gain_scale =
+            options.gnss_pos_positive_turn_position_gain_scale;
+      } else if (strong_turn && omega_z_deg_s < 0.0 &&
+                 options.gnss_pos_negative_turn_position_gain_scale >= 0.0) {
+        effective_pos_gain_scale =
+            options.gnss_pos_negative_turn_position_gain_scale;
+      }
+      if (strong_turn && omega_z_deg_s > 0.0 &&
+          options.gnss_pos_positive_turn_lgy_from_y_gain_scale >= 0.0) {
+        effective_lgy_from_y_gain_scale =
+            options.gnss_pos_positive_turn_lgy_from_y_gain_scale;
+      } else if (strong_turn && omega_z_deg_s < 0.0 &&
+                 options.gnss_pos_negative_turn_lgy_from_y_gain_scale >= 0.0) {
+        effective_lgy_from_y_gain_scale =
+            options.gnss_pos_negative_turn_lgy_from_y_gain_scale;
+      }
+    }
+
+    StateGainScale gnss_pos_gain_scale;
+    gnss_pos_gain_scale.fill(1.0);
+    const StateGainScale *gnss_pos_gain_scale_ptr = nullptr;
+    if (std::abs(effective_pos_gain_scale - 1.0) > 1.0e-12) {
+      for (int axis = 0; axis < 3; ++axis) {
+        gnss_pos_gain_scale[StateIdx::kPos + axis] =
+            effective_pos_gain_scale;
+      }
+      gnss_pos_gain_scale_ptr = &gnss_pos_gain_scale;
+    }
+    StateMeasurementGainScale gnss_pos_gain_element_scale;
+    const StateMeasurementGainScale *gnss_pos_gain_element_scale_ptr = nullptr;
+    if ((std::abs(options.gnss_pos_lgx_from_y_gain_scale - 1.0) > 1.0e-12 ||
+         std::abs(effective_lgy_from_y_gain_scale - 1.0) > 1.0e-12) &&
+        model.y.size() >= 2) {
+      gnss_pos_gain_element_scale =
+          StateMeasurementGainScale::Ones(kStateDim, model.y.size());
+      gnss_pos_gain_element_scale(StateIdx::kGnssLever + 0, 1) =
+          options.gnss_pos_lgx_from_y_gain_scale;
+      gnss_pos_gain_element_scale(StateIdx::kGnssLever + 1, 1) =
+          effective_lgy_from_y_gain_scale;
+      gnss_pos_gain_element_scale_ptr = &gnss_pos_gain_element_scale;
+    }
+
+    const string effective_gnss_pos_update_mode =
+        ComputeEffectiveGnssPosUpdateMode(options, t_gnss);
+
+    // 诊断日志：观测姿态列范数与“若当前直接做 joint update”的预测修正量。
     {
       double h_att_norm = model.H.block<3, 3>(0, StateIdx::kAtt).norm();
       cout << "[GNSS_POS] t=" << fixed << setprecision(3) << t_gnss
            << " mode="
            << ((fej != nullptr && fej->enabled) ? "InEKF" : "ESKF")
-           << " | ||H_att||_F=" << setprecision(6) << h_att_norm << "\n";
+           << " | ||H_att||_F=" << setprecision(6) << h_att_norm
+           << " | update_mode=" << options.gnss_pos_update_mode
+           << " | effective_update_mode=" << effective_gnss_pos_update_mode
+           << " | pos_gain_scale=" << options.gnss_pos_position_gain_scale
+           << " | effective_pos_gain_scale=" << effective_pos_gain_scale
+           << " | lgx_from_y_gain_scale="
+           << options.gnss_pos_lgx_from_y_gain_scale
+           << " | lgy_from_y_gain_scale="
+           << options.gnss_pos_lgy_from_y_gain_scale
+           << " | effective_lgy_from_y_gain_scale="
+           << effective_lgy_from_y_gain_scale
+           << " | omega_z_deg_s=" << omega_z_deg_s;
+      cout << "\n";
     }
 
-    bool gnss_pos_updated =
-        diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R, nullptr);
+    bool gnss_pos_updated = false;
+    const SteadyClock::time_point pos_update_start =
+        (perf_stats != nullptr && perf_stats->enabled) ? SteadyClock::now()
+                                                       : SteadyClock::time_point{};
+    if (effective_gnss_pos_update_mode == "stage_nonpos_then_pos") {
+      const StateMask non_position_mask = BuildGnssPosNonPositionMask();
+      const StateMask position_only_mask = BuildGnssPosPositionOnlyMask();
+      bool stage1_updated = diag.Correct(engine, "GNSS_POS_STAGE1_NONPOS",
+                                         t_gnss, model.y, model.H, model.R,
+                                         &non_position_mask, nullptr,
+                                         gnss_pos_gain_element_scale_ptr);
+      any_gnss_updated = any_gnss_updated || stage1_updated;
+      gnss_pos_updated = gnss_pos_updated || stage1_updated;
+
+      auto stage2_model = MeasModels::ComputeGnssPositionModel(
+          engine.state(), gnss_pos, gnss_std, fej);
+      bool stage2_updated = diag.Correct(engine, "GNSS_POS_STAGE2_POS",
+                                         t_gnss, stage2_model.y,
+                                         stage2_model.H, stage2_model.R,
+                                         &position_only_mask,
+                                         gnss_pos_gain_scale_ptr, nullptr);
+      any_gnss_updated = any_gnss_updated || stage2_updated;
+      gnss_pos_updated = gnss_pos_updated || stage2_updated;
+    } else if (effective_gnss_pos_update_mode == "position_only") {
+      const StateMask position_only_mask = BuildGnssPosPositionOnlyMask();
+      gnss_pos_updated =
+          diag.Correct(engine, "GNSS_POS_POS_ONLY", t_gnss, model.y, model.H,
+                       model.R, &position_only_mask, gnss_pos_gain_scale_ptr,
+                       nullptr);
+      any_gnss_updated = any_gnss_updated || gnss_pos_updated;
+    } else {
+      gnss_pos_updated =
+          diag.Correct(engine, "GNSS_POS", t_gnss, model.y, model.H, model.R,
+                       nullptr, gnss_pos_gain_scale_ptr,
+                       gnss_pos_gain_element_scale_ptr);
+      any_gnss_updated = any_gnss_updated || gnss_pos_updated;
+    }
+    const double pos_update_s =
+        (perf_stats != nullptr && perf_stats->enabled)
+            ? DurationSeconds(SteadyClock::now() - pos_update_start)
+            : 0.0;
     if (gnss_pos_updated) {
       MaybeCaptureGnssSplitDebug(debug_capture, engine, "GNSS_POS", t_gnss,
                                  gnss_split_t, options.gating.time_tolerance);
     }
 
-    // 如果存在GNSS速度数据，执行速度更新
-    if (has_vel && options.enable_gnss_velocity) {
+    // GNSS_VEL 是独立量测链，仍由 enable_gnss_velocity 显式控制。
+    double vel_update_s = 0.0;
+    if (has_gnss_vel_data && options.enable_gnss_velocity) {
       Vector3d gnss_vel = dataset.gnss.velocities.row(gnss_idx).transpose();
       Vector3d gnss_vel_std = dataset.gnss.vel_std.row(gnss_idx).transpose();
 
@@ -839,12 +1705,184 @@ void RunGnssUpdate(EskfEngine &engine, const Dataset &dataset,
       auto vel_model = MeasModels::ComputeGnssVelocityModel(
           engine.state(), gnss_vel, omega_ib_b_raw, gnss_vel_std, fej);
 
-      (void)diag.Correct(engine, "GNSS_VEL", t_gnss, vel_model.y, vel_model.H,
-                         vel_model.R, nullptr);
+      const SteadyClock::time_point vel_update_start =
+          (perf_stats != nullptr && perf_stats->enabled)
+              ? SteadyClock::now()
+              : SteadyClock::time_point{};
+      bool gnss_vel_updated =
+          diag.Correct(engine, "GNSS_VEL", t_gnss, vel_model.y, vel_model.H,
+                       vel_model.R, nullptr);
+      any_gnss_updated = any_gnss_updated || gnss_vel_updated;
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        vel_update_s = DurationSeconds(SteadyClock::now() - vel_update_start);
+      }
+    }
+    if (perf_stats != nullptr && perf_stats->enabled) {
+      cerr << "[Perf][GNSS] end idx=" << gnss_idx
+           << " t_gnss=" << t_gnss
+           << " dt_align=" << dt_align
+           << " model_s=" << model_s
+           << " pos_update_s=" << pos_update_s
+           << " vel_update_s=" << vel_update_s
+           << " updated=" << (gnss_pos_updated ? 1 : 0) << endl;
     }
 
     ++gnss_idx;
   }
+  if (perf_stats != nullptr && perf_stats->enabled) {
+    perf_stats->gnss_update_s += DurationSeconds(SteadyClock::now() - call_start);
+    ++perf_stats->gnss_update_calls;
+    if (gnss_idx > gnss_idx_begin) {
+      perf_stats->gnss_samples += static_cast<size_t>(gnss_idx - gnss_idx_begin);
+    }
+  }
+  return any_gnss_updated;
+}
+
+bool PredictCurrentIntervalWithExactGnss(EskfEngine &engine,
+                                         const Dataset &dataset,
+                                         int &gnss_idx, double t_curr,
+                                         const FusionOptions &options,
+                                         DiagnosticsEngine &diag,
+                                         const ImuData *imu_curr,
+                                         const FejManager *fej,
+                                         double gnss_split_t,
+                                         FusionDebugCapture *debug_capture,
+                                         bool &gnss_updated_out,
+                                         FusionPerfStats *perf_stats) {
+  gnss_updated_out = false;
+  if (dataset.gnss.timestamps.size() == 0) {
+    return engine.Predict();
+  }
+  const SteadyClock::time_point call_start =
+      (perf_stats != nullptr && perf_stats->enabled) ? SteadyClock::now()
+                                                     : SteadyClock::time_point{};
+  if (perf_stats != nullptr && perf_stats->enabled) {
+    ++perf_stats->gnss_exact_calls;
+  }
+
+  const double tol = options.gating.time_tolerance;
+  ImuData seg_prev = engine.prev_imu();
+  ImuData seg_curr = engine.curr_imu();
+  bool propagated_to_curr = false;
+  size_t dummy_predict_counter = 0;
+  size_t &split_predict_counter =
+      (perf_stats != nullptr) ? perf_stats->split_predict_count
+                              : dummy_predict_counter;
+  size_t &align_curr_predict_counter =
+      (perf_stats != nullptr) ? perf_stats->align_curr_predict_count
+                              : dummy_predict_counter;
+  size_t &tail_predict_counter =
+      (perf_stats != nullptr) ? perf_stats->tail_predict_count
+                              : dummy_predict_counter;
+  const auto timed_predict =
+      [&](const ImuData &imu_prev_local, const ImuData &imu_curr_local,
+          size_t &counter, const char *debug_tag) -> bool {
+    const SteadyClock::time_point predict_start =
+        (perf_stats != nullptr && perf_stats->enabled) ? SteadyClock::now()
+                                                       : SteadyClock::time_point{};
+    bool ok = engine.PredictWithImuPair(imu_prev_local, imu_curr_local);
+    if (perf_stats != nullptr && perf_stats->enabled) {
+      perf_stats->predict_s +=
+          DurationSeconds(SteadyClock::now() - predict_start);
+      ++counter;
+    }
+    if (ok) {
+      diag.LogPredict(debug_tag, engine);
+    }
+    return ok;
+  };
+
+  while (gnss_idx < (int)dataset.gnss.timestamps.size()) {
+    const double t_gnss = dataset.gnss.timestamps(gnss_idx);
+    if (t_gnss > t_curr + tol) {
+      break;
+    }
+    if (t_gnss < seg_prev.t - tol) {
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        cerr << "[Perf][GNSS_EXACT] drop_stale idx=" << gnss_idx
+             << " t_gnss=" << fixed << setprecision(6) << t_gnss
+             << " seg_prev_t=" << seg_prev.t
+             << " t_curr=" << t_curr << endl;
+      }
+      ++gnss_idx;
+      continue;
+    }
+    if (IsTimestampAlignedToReference(t_gnss, seg_prev.t, tol)) {
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        cerr << "[Perf][GNSS_EXACT] align_prev idx=" << gnss_idx
+             << " t_gnss=" << t_gnss
+             << " seg_prev_t=" << seg_prev.t << endl;
+      }
+      gnss_updated_out =
+          RunGnssUpdate(engine, dataset, gnss_idx, seg_prev.t, options, diag,
+                        &seg_prev, fej, gnss_split_t, debug_capture,
+                        perf_stats) ||
+          gnss_updated_out;
+      continue;
+    }
+    if (IsTimestampAlignedToReference(t_gnss, seg_curr.t, tol)) {
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        cerr << "[Perf][GNSS_EXACT] align_curr idx=" << gnss_idx
+             << " t_gnss=" << t_gnss
+             << " seg_curr_t=" << seg_curr.t << endl;
+      }
+      if (!propagated_to_curr) {
+        if (!timed_predict(seg_prev, seg_curr, align_curr_predict_counter,
+                           "align_curr")) {
+          return false;
+        }
+        propagated_to_curr = true;
+      }
+      gnss_updated_out =
+          RunGnssUpdate(engine, dataset, gnss_idx, seg_curr.t, options, diag,
+                        imu_curr, fej, gnss_split_t, debug_capture, perf_stats) ||
+          gnss_updated_out;
+      continue;
+    }
+
+    ImuData mid_imu;
+    ImuData tail_imu;
+    if (!SplitImuMeasurementAtTimestamp(seg_prev, seg_curr, t_gnss,
+                                        mid_imu, tail_imu)) {
+      if (perf_stats != nullptr && perf_stats->enabled) {
+        cerr << "[Perf][GNSS_EXACT] split_failed idx=" << gnss_idx
+             << " t_gnss=" << t_gnss
+             << " seg_prev_t=" << seg_prev.t
+             << " seg_curr_t=" << seg_curr.t << endl;
+      }
+      break;
+    }
+    if (perf_stats != nullptr && perf_stats->enabled) {
+      cerr << "[Perf][GNSS_EXACT] split idx=" << gnss_idx
+           << " t_gnss=" << t_gnss
+           << " seg_prev_t=" << seg_prev.t
+           << " seg_curr_t=" << seg_curr.t
+           << " mid_dt=" << mid_imu.dt
+           << " tail_dt=" << tail_imu.dt << endl;
+    }
+    if (!timed_predict(seg_prev, mid_imu, split_predict_counter, "split")) {
+      return false;
+    }
+    gnss_updated_out =
+        RunGnssUpdate(engine, dataset, gnss_idx, mid_imu.t, options, diag,
+                      &mid_imu, fej, gnss_split_t, debug_capture, perf_stats) ||
+        gnss_updated_out;
+    seg_prev = mid_imu;
+    seg_curr = tail_imu;
+  }
+
+  if (!propagated_to_curr) {
+    bool ok = timed_predict(seg_prev, seg_curr, tail_predict_counter, "tail");
+    if (perf_stats != nullptr && perf_stats->enabled) {
+      perf_stats->gnss_exact_s += DurationSeconds(SteadyClock::now() - call_start);
+    }
+    return ok;
+  }
+  if (perf_stats != nullptr && perf_stats->enabled) {
+    perf_stats->gnss_exact_s += DurationSeconds(SteadyClock::now() - call_start);
+  }
+  return true;
 }
 
 /** 记录一步融合结果 */
@@ -867,6 +1905,36 @@ void RecordResult(FusionResult &result, const State &s, double t) {
 
 }  // namespace
 
+bool ComputeAlignedGnssPositionMeasurement(const Dataset &dataset,
+                                          const NoiseParams &noise,
+                                          int gnss_idx, double t_curr,
+                                          Vector3d &gnss_pos_ecef,
+                                          Vector3d &gnss_std_out) {
+  (void)t_curr;
+  if (dataset.gnss.timestamps.size() == 0) {
+    return false;
+  }
+  if (gnss_idx < 0 || gnss_idx >= dataset.gnss.timestamps.size()) {
+    return false;
+  }
+
+  constexpr double kSigmaPosMin = 1e-4;
+  const double sigma_pos_fallback =
+      noise.sigma_gnss_pos > 0.0 ? noise.sigma_gnss_pos : 1.0;
+
+  gnss_pos_ecef = dataset.gnss.positions.row(gnss_idx).transpose();
+  gnss_std_out = dataset.gnss.std.row(gnss_idx).transpose();
+  for (int k = 0; k < 3; ++k) {
+    if (!std::isfinite(gnss_std_out(k)) || gnss_std_out(k) <= 0.0) {
+      gnss_std_out(k) = sigma_pos_fallback;
+    }
+    if (gnss_std_out(k) < kSigmaPosMin) {
+      gnss_std_out(k) = kSigmaPosMin;
+    }
+  }
+  return true;
+}
+
 // ============================================================
 // RunFusion — 融合主循环
 // ============================================================
@@ -875,6 +1943,16 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
                        const Matrix<double, kStateDim, kStateDim> &P0,
                        FusionDebugCapture *debug_capture) {
   FusionResult result;
+  FusionPerfStats perf_stats;
+  perf_stats.enabled = IsPerfDebugEnabledFromEnv();
+  if (perf_stats.enabled) {
+    perf_stats.progress_stride =
+        std::max<size_t>(1, dataset.imu.size() / 100);
+    perf_stats.wall_start = SteadyClock::now();
+    cerr << "[Perf] enabled progress_stride=" << perf_stats.progress_stride
+         << " imu_rows=" << dataset.imu.size()
+         << " gnss_rows=" << dataset.gnss.timestamps.size() << endl;
+  }
   if (dataset.imu.size() < 2) {
     cout << "error: IMU 数据不足，至少需要两帧增量\n";
     return result;
@@ -883,15 +1961,139 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   // 初始化诊断引擎
   DiagnosticsEngine diag(
       options.constraints,
-      options.constraints.enable_diagnostics || options.constraints.enable_mechanism_log);
+      options.constraints.enable_diagnostics ||
+          options.constraints.enable_mechanism_log ||
+          !options.first_update_debug_output_path.empty() ||
+          !options.gnss_update_debug_output_path.empty() ||
+          !options.predict_debug_output_path.empty());
   diag.Initialize(dataset, options);
+  std::ofstream nhc_admission_log_file;
+  if (options.constraints.enable_nhc_admission_log) {
+    namespace fs = std::filesystem;
+    fs::path sol_path(options.output_path);
+    fs::path log_path =
+        sol_path.parent_path() /
+        (sol_path.stem().string() + "_nhc_admission.csv");
+    if (!log_path.parent_path().empty()) {
+      fs::create_directories(log_path.parent_path());
+    }
+    nhc_admission_log_file.open(log_path, ios::out | ios::trunc);
+    if (nhc_admission_log_file.is_open()) {
+      nhc_admission_log_file << fixed << setprecision(9);
+      nhc_admission_log_file
+          << "t,selected_source,selected_accept,"
+          << "accept_v_b,accept_v_wheel_b,accept_v_v,"
+          << "below_forward_v_b,below_forward_v_wheel_b,below_forward_v_v,"
+          << "exceed_lat_vert_v_b,exceed_lat_vert_v_wheel_b,exceed_lat_vert_v_v,"
+          << "forward_speed_threshold,max_abs_v_threshold,"
+          << "v_b_x,v_b_y,v_b_z,"
+          << "v_wheel_b_x,v_wheel_b_y,v_wheel_b_z,"
+          << "v_v_x,v_v_y,v_v_z\n";
+    }
+  }
+  const bool runtime_truth_anchor_has_target =
+      options.init.runtime_truth_anchor_position ||
+      options.init.runtime_truth_anchor_velocity ||
+      options.init.runtime_truth_anchor_attitude;
+  const bool runtime_truth_anchor_enabled =
+      options.init.runtime_truth_anchor_pva && runtime_truth_anchor_has_target;
+  if (runtime_truth_anchor_enabled && dataset.truth.timestamps.size() <= 0) {
+    cout << "error: runtime_truth_anchor_pva=true 但真值数据为空\n";
+    return result;
+  }
+  if (options.init.runtime_truth_anchor_pva && !runtime_truth_anchor_has_target) {
+    cout << "[Init] WARNING: runtime_truth_anchor_pva=true，但 position/velocity/attitude "
+            "全部关闭，已自动禁用 runtime anchor\n";
+  }
+  int truth_anchor_cursor = 0;
 
   // 初始化 ESKF 引擎（支持状态消融）
   StateAblationConfig active_ablation = options.ablation;
-  NoiseParams runtime_noise = options.noise;
-  ApplyAblationToNoise(runtime_noise, active_ablation);
+  ConstraintConfig effective_constraints = options.constraints;
+  string last_runtime_phase_label;
+  const auto build_active_phase_label = [&](double t_now) {
+    string label;
+    for (const auto &phase : options.runtime_phases) {
+      if (!phase.enabled ||
+          !IsTimeInWindow(t_now, phase.start_time, phase.end_time,
+                          options.gating.time_tolerance)) {
+        continue;
+      }
+      if (!label.empty()) {
+        label += ",";
+      }
+      label += phase.name;
+    }
+    return label.empty() ? string("none") : label;
+  };
+  const auto compute_effective_ablation = [&](double t_now) {
+    StateAblationConfig effective = active_ablation;
+    for (const auto &phase : options.runtime_phases) {
+      if (!phase.enabled ||
+          !IsTimeInWindow(t_now, phase.start_time, phase.end_time,
+                          options.gating.time_tolerance)) {
+        continue;
+      }
+      effective = MergeAblationConfig(effective, phase.ablation);
+    }
+    if (IsTimeInWindow(t_now,
+                       options.constraints.debug_gnss_lever_arm_disable_start_time,
+                       options.constraints.debug_gnss_lever_arm_disable_end_time,
+                       options.gating.time_tolerance)) {
+      effective.disable_gnss_lever_arm = true;
+    }
+    if (std::isfinite(options.constraints.debug_mounting_yaw_enable_after_time) &&
+        t_now + options.gating.time_tolerance <
+            options.constraints.debug_mounting_yaw_enable_after_time) {
+      effective.disable_mounting_yaw = true;
+    }
+    return effective;
+  };
+  const auto compute_effective_constraints = [&](double t_now) {
+    ConstraintConfig effective = options.constraints;
+    for (const auto &phase : options.runtime_phases) {
+      if (!phase.enabled ||
+          !IsTimeInWindow(t_now, phase.start_time, phase.end_time,
+                          options.gating.time_tolerance)) {
+        continue;
+      }
+      effective = ApplyRuntimeConstraintOverride(effective, phase.constraints);
+    }
+    return effective;
+  };
+  const auto build_effective_noise = [&](double t_now,
+                                         const StateAblationConfig &ablation) {
+    NoiseParams effective = options.noise;
+    for (const auto &phase : options.runtime_phases) {
+      if (!phase.enabled ||
+          !IsTimeInWindow(t_now, phase.start_time, phase.end_time,
+                          options.gating.time_tolerance)) {
+        continue;
+      }
+      ApplyRuntimeNoiseOverride(effective, phase.noise);
+    }
+    ApplyAblationToNoise(effective, ablation);
+    return effective;
+  };
+  const auto build_covariance_floor = [&](const ConstraintConfig &cfg) {
+    CovarianceFloor floor;
+    floor.enabled = cfg.enable_covariance_floor;
+    floor.pos_var = cfg.p_floor_pos_var;
+    floor.vel_var = cfg.p_floor_vel_var;
+    floor.att_var = std::pow(cfg.p_floor_att_deg * kDegToRad, 2);
+    floor.odo_scale_var = cfg.p_floor_odo_scale_var;
+    floor.lever_var = cfg.p_floor_lever_arm_vec;
+    floor.mounting_var = std::pow(cfg.p_floor_mounting_deg * kDegToRad, 2);
+    floor.bg_var = cfg.p_floor_bg_var;
+    return floor;
+  };
+  StateAblationConfig effective_ablation =
+      compute_effective_ablation(dataset.imu.front().t);
+  effective_constraints = compute_effective_constraints(dataset.imu.front().t);
+  NoiseParams runtime_noise =
+      build_effective_noise(dataset.imu.front().t, effective_ablation);
   EskfEngine engine(runtime_noise);
-  StateMask state_mask = BuildStateMask(active_ablation);
+  StateMask state_mask = BuildStateMask(effective_ablation);
   engine.SetStateMask(state_mask);
   CorrectionGuard guard;
   guard.enabled = options.constraints.enforce_extrinsic_bounds;
@@ -905,16 +2107,7 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   guard.max_mounting_step = options.constraints.max_mounting_step_deg * kDegToRad;
   guard.max_lever_arm_step = options.constraints.max_lever_arm_step;
   engine.SetCorrectionGuard(guard);
-  CovarianceFloor covariance_floor;
-  covariance_floor.enabled = options.constraints.enable_covariance_floor;
-  covariance_floor.pos_var = options.constraints.p_floor_pos_var;
-  covariance_floor.vel_var = options.constraints.p_floor_vel_var;
-  covariance_floor.att_var =
-      std::pow(options.constraints.p_floor_att_deg * kDegToRad, 2);
-  covariance_floor.mounting_var =
-      std::pow(options.constraints.p_floor_mounting_deg * kDegToRad, 2);
-  covariance_floor.bg_var = options.constraints.p_floor_bg_var;
-  engine.SetCovarianceFloor(covariance_floor);
+  engine.SetCovarianceFloor(build_covariance_floor(effective_constraints));
   Vector3d cfg_mounting_rpy = options.constraints.imu_mounting_angle * kDegToRad;
   // 安装角基准语义：
   // - legacy: 兼容旧逻辑（init 分量非零时不叠加 constraints 对应分量）
@@ -960,8 +2153,128 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   fej.debug_enable_standard_reset_gamma =
       options.fej.debug_enable_standard_reset_gamma;
   engine.SetFejManager(&fej);
+  auto apply_runtime_truth_anchor = [&](double t, const char *stage,
+                                        bool gnss_updated) -> bool {
+    if (!runtime_truth_anchor_enabled) {
+      return true;
+    }
+    if (options.init.runtime_truth_anchor_gnss_only && !gnss_updated) {
+      return true;
+    }
+    if (!ApplyRuntimeTruthAnchor(engine, dataset.truth, options.init, t,
+                                 truth_anchor_cursor)) {
+      cout << "error: runtime truth anchor failed at stage=" << stage
+           << " t=" << fixed << setprecision(6) << t << "\n";
+      return false;
+    }
+    return true;
+  };
   engine.Initialize(x0, P0);
+  if (!apply_runtime_truth_anchor(dataset.imu.front().t, "initialize", false)) {
+    return result;
+  }
   cout << "[Init] InEKF: " << (fej.enabled ? "ON" : "OFF") << "\n";
+  cout << "[Init] Runtime truth PVA anchor: "
+       << (runtime_truth_anchor_enabled ? "ON" : "OFF") << "\n";
+  if (!options.runtime_phases.empty()) {
+    cout << "[Init] Runtime phases: " << options.runtime_phases.size()
+         << " active_at_start=" << build_active_phase_label(dataset.imu.front().t)
+         << "\n";
+  }
+  if (options.constraints.debug_odo_disable_bgz_jacobian ||
+      options.constraints.debug_odo_disable_bgz_state_update ||
+      options.constraints.debug_nhc_disable_bgz_state_update ||
+      options.constraints.enable_nhc_admission_log ||
+      options.constraints.nhc_admission_velocity_source != "v_b" ||
+      options.constraints.enable_bgz_observability_gate ||
+      options.constraints.enable_bgz_covariance_forgetting ||
+      options.constraints.debug_run_odo_before_nhc ||
+      options.constraints.disable_nhc_when_weak_excitation ||
+      options.constraints.disable_odo_when_weak_excitation ||
+      std::isfinite(options.constraints.debug_nhc_disable_start_time) ||
+      std::isfinite(options.constraints.debug_nhc_disable_end_time) ||
+      std::isfinite(options.constraints.debug_odo_disable_start_time) ||
+      std::isfinite(options.constraints.debug_odo_disable_end_time) ||
+      std::isfinite(
+          options.constraints.debug_gnss_lever_arm_disable_start_time) ||
+      std::isfinite(
+          options.constraints.debug_gnss_lever_arm_disable_end_time) ||
+      std::isfinite(options.constraints.debug_nhc_enable_after_time) ||
+      std::isfinite(options.constraints.debug_mounting_yaw_enable_after_time) ||
+      std::isfinite(
+          options.constraints.debug_reset_bg_z_state_and_cov_after_time) ||
+      std::isfinite(
+          options.constraints.debug_seed_mount_yaw_bgz_cov_before_first_nhc) ||
+      std::isfinite(options.constraints.debug_seed_bg_z_before_first_nhc) ||
+  options.constraints.debug_seed_bg_z_att_cov_before_first_nhc.allFinite()) {
+    cout << "[Init] Constraint debug toggles: odo_disable_bgz_jacobian="
+         << (options.constraints.debug_odo_disable_bgz_jacobian ? "ON" : "OFF")
+         << " nhc_admission_source="
+         << options.constraints.nhc_admission_velocity_source
+         << " nhc_admission_log="
+         << (options.constraints.enable_nhc_admission_log ? "ON" : "OFF")
+         << " odo_disable_bgz_state_update="
+         << (options.constraints.debug_odo_disable_bgz_state_update ? "ON" : "OFF")
+         << " nhc_disable_bgz_state_update="
+         << (options.constraints.debug_nhc_disable_bgz_state_update ? "ON" : "OFF")
+         << " bgz_observability_gate="
+         << (options.constraints.enable_bgz_observability_gate ? "ON" : "OFF")
+         << " bgz_gate_apply_to_odo="
+         << (options.constraints.bgz_gate_apply_to_odo ? "ON" : "OFF")
+         << " bgz_gate_apply_to_nhc="
+         << (options.constraints.bgz_gate_apply_to_nhc ? "ON" : "OFF")
+         << " bgz_gate_forward_speed_min="
+         << options.constraints.bgz_gate_forward_speed_min
+         << " bgz_gate_yaw_rate_min_deg_s="
+         << options.constraints.bgz_gate_yaw_rate_min_deg_s
+         << " bgz_gate_lateral_acc_min="
+         << options.constraints.bgz_gate_lateral_acc_min
+         << " bgz_gate_min_scale="
+         << options.constraints.bgz_gate_min_scale
+         << " bgz_covariance_forgetting="
+         << (options.constraints.enable_bgz_covariance_forgetting ? "ON" : "OFF")
+         << " bgz_cov_forgetting_tau_s="
+         << options.constraints.bgz_cov_forgetting_tau_s
+         << " disable_nhc_when_weak_excitation="
+         << (options.constraints.disable_nhc_when_weak_excitation ? "ON" : "OFF")
+         << " disable_odo_when_weak_excitation="
+         << (options.constraints.disable_odo_when_weak_excitation ? "ON" : "OFF")
+         << " odo_before_nhc="
+         << (options.constraints.debug_run_odo_before_nhc ? "ON" : "OFF")
+         << " nhc_disable_window=["
+         << options.constraints.debug_nhc_disable_start_time << ", "
+         << options.constraints.debug_nhc_disable_end_time << "]"
+         << " odo_disable_window=["
+         << options.constraints.debug_odo_disable_start_time << ", "
+         << options.constraints.debug_odo_disable_end_time << "]"
+         << " gnss_lever_disable_window=["
+         << options.constraints.debug_gnss_lever_arm_disable_start_time << ", "
+         << options.constraints.debug_gnss_lever_arm_disable_end_time << "]"
+         << " nhc_enable_after_time="
+         << options.constraints.debug_nhc_enable_after_time
+         << " mounting_yaw_enable_after_time="
+         << options.constraints.debug_mounting_yaw_enable_after_time
+         << " reset_bg_z_state_and_cov_after_time="
+         << options.constraints.debug_reset_bg_z_state_and_cov_after_time
+         << " reset_bg_z_value="
+         << options.constraints.debug_reset_bg_z_value
+         << " seed_mount_yaw_bgz_cov_before_first_nhc="
+         << options.constraints.debug_seed_mount_yaw_bgz_cov_before_first_nhc
+         << " seed_bg_z_before_first_nhc="
+         << options.constraints.debug_seed_bg_z_before_first_nhc
+         << " seed_bg_z_att_cov_before_first_nhc="
+         << options.constraints.debug_seed_bg_z_att_cov_before_first_nhc.transpose()
+         << "\n";
+  }
+  if (runtime_truth_anchor_enabled) {
+    cout << "[Init] Runtime truth anchor components: pos="
+         << (options.init.runtime_truth_anchor_position ? "ON" : "OFF")
+         << " vel=" << (options.init.runtime_truth_anchor_velocity ? "ON" : "OFF")
+         << " att=" << (options.init.runtime_truth_anchor_attitude ? "ON" : "OFF")
+         << " trigger="
+         << (options.init.runtime_truth_anchor_gnss_only ? "gnss_only" : "all_stages")
+         << "\n";
+  }
   if (fej.enabled) {
     cout << "[Init] RI Jacobian sign consistency check skipped "
          << "(new InEKF H is not expected to be opposite-sign to ESKF)\n";
@@ -982,19 +2295,28 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
          << (fej.apply_covariance_floor_after_reset ? "ON" : "OFF") << "\n";
   }
   cout << "[Init] Ablation: "
-       << "gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
+       << "gnss_lever=" << (effective_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
        << " gnss_lever_z="
-       << ((active_ablation.disable_gnss_lever_arm || active_ablation.disable_gnss_lever_z)
+       << ((effective_ablation.disable_gnss_lever_arm || effective_ablation.disable_gnss_lever_z)
                ? "OFF"
                : "ON")
-       << " odo_lever=" << (active_ablation.disable_odo_lever_arm ? "OFF" : "ON")
-       << " odo_scale=" << (active_ablation.disable_odo_scale ? "OFF" : "ON")
-       << " gyro_bias=" << (active_ablation.disable_gyro_bias ? "OFF" : "ON")
-       << " gyro_scale=" << (active_ablation.disable_gyro_scale ? "OFF" : "ON")
-       << " accel_scale=" << (active_ablation.disable_accel_scale ? "OFF" : "ON")
-       << " mounting=" << (active_ablation.disable_mounting ? "OFF" : "ON")
+       << " odo_lever=" << (effective_ablation.disable_odo_lever_arm ? "OFF" : "ON")
+       << " odo_scale=" << (effective_ablation.disable_odo_scale ? "OFF" : "ON")
+       << " accel_bias=" << (effective_ablation.disable_accel_bias ? "OFF" : "ON")
+       << " gyro_bias=" << (effective_ablation.disable_gyro_bias ? "OFF" : "ON")
+       << " gyro_scale=" << (effective_ablation.disable_gyro_scale ? "OFF" : "ON")
+       << " accel_scale=" << (effective_ablation.disable_accel_scale ? "OFF" : "ON")
+       << " mounting=" << (effective_ablation.disable_mounting ? "OFF" : "ON")
        << " mounting_roll="
-       << ((active_ablation.disable_mounting || active_ablation.disable_mounting_roll)
+       << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_roll)
+               ? "OFF"
+               : "ON")
+       << " mounting_pitch="
+       << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_pitch)
+               ? "OFF"
+               : "ON")
+       << " mounting_yaw="
+       << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_yaw)
                ? "OFF"
                : "ON")
        << "\n";
@@ -1031,11 +2353,21 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   // GNSS 时间调度（按融合时间轴比例）
   bool gnss_schedule_active = false;
   double gnss_schedule_split_t = std::numeric_limits<double>::infinity();
+  bool gnss_schedule_use_windows = false;
+  double gnss_schedule_last_window_end = -std::numeric_limits<double>::infinity();
   if (options.gnss_schedule.enabled) {
     if (dataset.gnss.timestamps.size() <= 0) {
       cout << "[Warn] GNSS schedule enabled but GNSS data is empty\n";
     } else if (dataset.imu.empty() || dataset.imu.back().t <= dataset.imu.front().t) {
       cout << "[Warn] GNSS schedule skipped: invalid IMU time range\n";
+    } else if (!options.gnss_schedule.enabled_windows.empty()) {
+      gnss_schedule_use_windows = true;
+      gnss_schedule_active = true;
+      gnss_schedule_last_window_end =
+          options.gnss_schedule.enabled_windows.back().second;
+      cout << "[GNSS] schedule ON: windows="
+           << options.gnss_schedule.enabled_windows.size()
+           << " last_window_end=" << gnss_schedule_last_window_end << "\n";
     } else {
       double t0_nav = dataset.imu.front().t;
       double t1_nav = dataset.imu.back().t;
@@ -1054,71 +2386,225 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
   double last_odo_speed = 0.0;
   double last_nhc_update_t = -1e18;
   double last_odo_update_t = -1e18;
+  bool debug_seed_mount_yaw_bgz_cov_applied = false;
+  bool debug_reset_bg_z_state_and_cov_applied = false;
   ConstraintUpdateStats nhc_stats;
   ConstraintUpdateStats odo_stats;
+  const auto sync_runtime_controls = [&](double t_now) {
+    effective_constraints = compute_effective_constraints(t_now);
+    effective_ablation = compute_effective_ablation(t_now);
+    NoiseParams effective_noise = build_effective_noise(t_now, effective_ablation);
+    engine.SetNoiseParams(effective_noise);
+    engine.SetStateMask(BuildStateMask(effective_ablation));
+    engine.SetCovarianceFloor(build_covariance_floor(effective_constraints));
+    const string phase_label = build_active_phase_label(t_now);
+    if (phase_label != last_runtime_phase_label) {
+      cout << "[Runtime] phases t=" << fixed << setprecision(3) << t_now
+           << " active=" << phase_label
+           << " enable_odo=" << (effective_constraints.enable_odo ? "ON" : "OFF")
+           << " enable_nhc=" << (effective_constraints.enable_nhc ? "ON" : "OFF")
+           << " cov_floor=" << (effective_constraints.enable_covariance_floor ? "ON" : "OFF")
+           << " p_floor_odo_scale_var=" << effective_constraints.p_floor_odo_scale_var
+           << " p_floor_mounting_deg=" << effective_constraints.p_floor_mounting_deg
+           << " nis_gating=" << (effective_constraints.enable_nis_gating ? "ON" : "OFF")
+           << " odo_gate_prob=" << effective_constraints.odo_nis_gate_prob
+           << " nhc_gate_prob=" << effective_constraints.nhc_nis_gate_prob
+           << "\n";
+      last_runtime_phase_label = phase_label;
+    }
+  };
 
   engine.AddImu(dataset.imu[0]);
   for (size_t i = 1; i < dataset.imu.size(); ++i) {
     engine.AddImu(dataset.imu[i]);
-    if (!engine.Predict()) continue;
-
     double t = dataset.imu[i].t;
     double dt = dataset.imu[i].dt;
+    sync_runtime_controls(t);
 
     const FejManager *fej_ptr = fej.enabled ? &fej : nullptr;
     const FejManager *fej_ptr_mut = fej.enabled ? &fej : nullptr;
 
+    bool gnss_enabled_now = true;
+    bool gnss_schedule_finished = false;
+    if (gnss_schedule_active) {
+      if (gnss_schedule_use_windows) {
+        gnss_enabled_now = IsTimeInAnyWindow(
+            t, options.gnss_schedule.enabled_windows, options.gating.time_tolerance);
+        gnss_schedule_finished =
+            t > gnss_schedule_last_window_end + options.gating.time_tolerance;
+      } else {
+        gnss_enabled_now =
+            t <= gnss_schedule_split_t + options.gating.time_tolerance;
+        gnss_schedule_finished = !gnss_enabled_now;
+      }
+    }
+    if (gnss_schedule_use_windows && !gnss_enabled_now &&
+        !gnss_schedule_finished) {
+      const int drop_begin = gnss_idx;
+      const int dropped = AdvanceTimestampIndexToTime(
+          dataset.gnss.timestamps, gnss_idx, t, options.gating.time_tolerance);
+      if (dropped > 0) {
+        const double first_dropped_t = dataset.gnss.timestamps(drop_begin);
+        const double last_dropped_t = dataset.gnss.timestamps(gnss_idx - 1);
+        cout << "[GNSS] schedule dropped " << dropped
+             << " sample(s) in off-window at t=" << fixed
+             << setprecision(3) << t
+             << " | sample_range=[" << first_dropped_t << ", "
+             << last_dropped_t << "]\n";
+      }
+    }
+
+    bool gnss_updated = false;
+    bool predict_ok = false;
+    if (gnss_enabled_now) {
+      predict_ok = PredictCurrentIntervalWithExactGnss(
+          engine, dataset, gnss_idx, t, options, diag, &dataset.imu[i],
+          fej_ptr_mut, gnss_schedule_split_t, debug_capture, gnss_updated,
+          &perf_stats);
+    } else {
+      const SteadyClock::time_point predict_start =
+          perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
+      predict_ok = engine.Predict();
+      if (perf_stats.enabled) {
+        perf_stats.predict_s +=
+            DurationSeconds(SteadyClock::now() - predict_start);
+        ++perf_stats.direct_predict_count;
+      }
+      if (predict_ok) {
+        diag.LogPredict("direct", engine);
+      }
+    }
+    if (!predict_ok) continue;
+
+    if (!apply_runtime_truth_anchor(t, "predict", false)) {
+      break;
+    }
+    ApplyBgzCovarianceForgettingIfNeeded(engine, dataset.imu[i],
+                                         effective_constraints);
+    ApplyDebugResetBgzStateAndCov(engine, effective_constraints, t,
+                                  options.gating.time_tolerance,
+                                  debug_reset_bg_z_state_and_cov_applied);
+
+    const bool nhc_time_gate_open =
+        !std::isfinite(effective_constraints.debug_nhc_enable_after_time) ||
+        t + options.gating.time_tolerance >=
+            effective_constraints.debug_nhc_enable_after_time;
+
     // 1. ZUPT 更新
-    bool zupt_ready = RunZuptUpdate(engine, dataset.imu[i], options.constraints,
-                                     static_duration, diag, t);
+    const SteadyClock::time_point zupt_start =
+        perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
+    bool zupt_ready = RunZuptUpdate(engine, dataset.imu[i], effective_constraints,
+                                    static_duration, diag, t);
+    if (perf_stats.enabled) {
+      perf_stats.zupt_s += DurationSeconds(SteadyClock::now() - zupt_start);
+    }
+    if (!apply_runtime_truth_anchor(t, "zupt", false)) {
+      break;
+    }
 
     // 2. 重力对准诊断（ZUPT 之后、NHC 之前）
-    diag.CheckGravityAlignment(t, dt, dataset.imu[i], engine.state(), dataset.truth);
+    const SteadyClock::time_point gravity_diag_start =
+        perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
+    diag.CheckGravityAlignment(t, dt, dataset.imu[i], engine.state(),
+                               dataset.truth);
+    if (perf_stats.enabled) {
+      perf_stats.gravity_diag_s +=
+          DurationSeconds(SteadyClock::now() - gravity_diag_start);
+    }
 
-    // 3. NHC 更新
-    double nhc_min_interval = std::max(0.0, options.constraints.nhc_min_update_interval);
-    RunNhcUpdate(engine, dataset.imu[i], options.constraints, mounting_base_rpy,
-                 zupt_ready, diag, t, fej_ptr, nhc_stats, last_nhc_update_t,
-                 nhc_min_interval);
+    // 3-4. NHC / ODO 更新（默认 NHC->ODO，可用 research toggle 交换顺序）
+    double nhc_min_interval =
+        std::max(0.0, effective_constraints.nhc_min_update_interval);
+    double odo_min_interval =
+        std::max(0.0, effective_constraints.odo_min_update_interval);
+    if (!effective_constraints.enable_odo) {
+      AdvanceMatrixTimeIndexToTime(dataset.odo, odo_idx, 0,
+                                   effective_constraints.odo_time_offset, t,
+                                   options.gating.time_tolerance);
+    }
+    if (effective_constraints.debug_run_odo_before_nhc) {
+      last_odo_speed = RunOdoUpdate(engine, dataset, effective_constraints,
+                                    options.gating, mounting_base_rpy, odo_idx, t,
+                                    dataset.imu[i], diag, fej_ptr, odo_stats,
+                                    last_odo_update_t, odo_min_interval);
+      if (!apply_runtime_truth_anchor(t, "odo", false)) {
+        break;
+      }
 
-    // 4. ODO 更新
-    double odo_min_interval = std::max(0.0, options.constraints.odo_min_update_interval);
-    last_odo_speed = RunOdoUpdate(engine, dataset, options.constraints, options.gating,
-                                    mounting_base_rpy, odo_idx, t, dataset.imu[i], diag,
-                                    fej_ptr, odo_stats, last_odo_update_t,
-                                    odo_min_interval);
+      ApplyDebugSeedBeforeFirstNhc(
+          engine, effective_constraints, debug_seed_mount_yaw_bgz_cov_applied);
+      if (nhc_time_gate_open) {
+        RunNhcUpdate(engine, dataset.imu[i], effective_constraints,
+                     mounting_base_rpy, zupt_ready, diag, t, fej_ptr,
+                     nhc_stats, last_nhc_update_t, nhc_min_interval,
+                     &nhc_admission_log_file);
+      }
+      if (!apply_runtime_truth_anchor(t, "nhc", false)) {
+        break;
+      }
+    } else {
+      ApplyDebugSeedBeforeFirstNhc(
+          engine, effective_constraints, debug_seed_mount_yaw_bgz_cov_applied);
+      if (nhc_time_gate_open) {
+        RunNhcUpdate(engine, dataset.imu[i], effective_constraints,
+                     mounting_base_rpy, zupt_ready, diag, t, fej_ptr,
+                     nhc_stats, last_nhc_update_t, nhc_min_interval,
+                     &nhc_admission_log_file);
+      }
+      if (!apply_runtime_truth_anchor(t, "nhc", false)) {
+        break;
+      }
 
+      last_odo_speed = RunOdoUpdate(engine, dataset, effective_constraints,
+                                    options.gating, mounting_base_rpy, odo_idx, t,
+                                    dataset.imu[i], diag, fej_ptr, odo_stats,
+                                    last_odo_update_t, odo_min_interval);
+      if (!apply_runtime_truth_anchor(t, "odo", false)) {
+        break;
+      }
+    }
     // 5. UWB 更新
+    const SteadyClock::time_point uwb_start =
+        perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
     RunUwbUpdate(engine, dataset, uwb_idx, t, options,
                  uwb_schedule_active, uwb_schedule_split_t,
                  uwb_head_indices, uwb_tail_indices, diag);
-
-    // 6. GNSS 位置更新（可按时间窗关闭，并在关闭后切换状态冻结）
-    const ImuData &imu_curr_ref = dataset.imu[i];
-    bool gnss_enabled_now = true;
-    if (gnss_schedule_active &&
-        t > gnss_schedule_split_t + options.gating.time_tolerance) {
-      gnss_enabled_now = false;
+    if (perf_stats.enabled) {
+      perf_stats.uwb_s += DurationSeconds(SteadyClock::now() - uwb_start);
     }
-    if (!gnss_enabled_now && !post_gnss_ablation_applied) {
+    if (!apply_runtime_truth_anchor(t, "uwb", false)) {
+      break;
+    }
+
+    // 6. GNSS 时间窗结束后的状态冻结切换
+    if (gnss_schedule_finished && !post_gnss_ablation_applied) {
       gnss_idx = static_cast<int>(dataset.gnss.timestamps.size());
       if (options.post_gnss_ablation.enabled) {
         active_ablation = MergeAblationConfig(active_ablation,
                                               options.post_gnss_ablation.ablation);
-        engine.SetStateMask(BuildStateMask(active_ablation));
+        sync_runtime_controls(t);
         cout << "[GNSS] post-gnss ablation applied at t=" << fixed
              << setprecision(3) << t
-             << " | gnss_lever=" << (active_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
+             << " | gnss_lever=" << (effective_ablation.disable_gnss_lever_arm ? "OFF" : "ON")
              << " gnss_lever_z="
-             << ((active_ablation.disable_gnss_lever_arm || active_ablation.disable_gnss_lever_z)
+             << ((effective_ablation.disable_gnss_lever_arm || effective_ablation.disable_gnss_lever_z)
                      ? "OFF"
                      : "ON")
-             << " odo_lever=" << (active_ablation.disable_odo_lever_arm ? "OFF" : "ON")
-             << " odo_scale=" << (active_ablation.disable_odo_scale ? "OFF" : "ON")
-             << " gyro_bias=" << (active_ablation.disable_gyro_bias ? "OFF" : "ON")
-             << " mounting=" << (active_ablation.disable_mounting ? "OFF" : "ON")
+             << " odo_lever=" << (effective_ablation.disable_odo_lever_arm ? "OFF" : "ON")
+             << " odo_scale=" << (effective_ablation.disable_odo_scale ? "OFF" : "ON")
+             << " accel_bias=" << (effective_ablation.disable_accel_bias ? "OFF" : "ON")
+             << " gyro_bias=" << (effective_ablation.disable_gyro_bias ? "OFF" : "ON")
+             << " mounting=" << (effective_ablation.disable_mounting ? "OFF" : "ON")
              << " mounting_roll="
-             << ((active_ablation.disable_mounting || active_ablation.disable_mounting_roll)
+             << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_roll)
+                     ? "OFF"
+                     : "ON")
+             << " mounting_pitch="
+             << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_pitch)
+                     ? "OFF"
+                     : "ON")
+             << " mounting_yaw="
+             << ((effective_ablation.disable_mounting || effective_ablation.disable_mounting_yaw)
                      ? "OFF"
                      : "ON")
              << "\n";
@@ -1128,21 +2614,56 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
       }
       post_gnss_ablation_applied = true;
     }
-    if (gnss_enabled_now) {
-      RunGnssUpdate(engine, dataset, gnss_idx, t, options, diag, &imu_curr_ref,
-                    fej_ptr_mut, gnss_schedule_split_t, debug_capture);
+    if (!apply_runtime_truth_anchor(t, "gnss", gnss_updated)) {
+      break;
     }
 
     // 7. 状态诊断
+    const SteadyClock::time_point step_diag_start =
+        perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
     diag.OnStepComplete(t, dt, engine.state(), dataset.imu[i],
                         zupt_ready, dataset.truth);
+    if (perf_stats.enabled) {
+      perf_stats.step_diag_s +=
+          DurationSeconds(SteadyClock::now() - step_diag_start);
+    }
 
     // 7. 记录结果
     RecordResult(result, engine.state(), t);
 
     // 8. DIAG.txt 输出
+    const SteadyClock::time_point diag_write_start =
+        perf_stats.enabled ? SteadyClock::now() : SteadyClock::time_point{};
     diag.WriteDiagLine(t, dt, engine, dataset.imu[i], last_odo_speed,
-                        dataset.imu.front().t);
+                       dataset.imu.front().t);
+    if (perf_stats.enabled) {
+      perf_stats.diag_write_s +=
+          DurationSeconds(SteadyClock::now() - diag_write_start);
+      ++perf_stats.imu_steps;
+      if (((i + 1) % perf_stats.progress_stride) == 0) {
+        const double wall_s =
+            DurationSeconds(SteadyClock::now() - perf_stats.wall_start);
+        cerr << "[Perf] step=" << (i + 1) << "/" << dataset.imu.size()
+             << " t=" << fixed << setprecision(3) << t
+             << " wall_s=" << wall_s
+             << " gnss_idx=" << gnss_idx
+             << " exact_calls=" << perf_stats.gnss_exact_calls
+             << " gnss_update_calls=" << perf_stats.gnss_update_calls
+             << " gnss_samples=" << perf_stats.gnss_samples
+             << " predict_s=" << perf_stats.predict_s
+             << " gnss_exact_s=" << perf_stats.gnss_exact_s
+             << " gnss_update_s=" << perf_stats.gnss_update_s
+             << " gravity_diag_s=" << perf_stats.gravity_diag_s
+             << " step_diag_s=" << perf_stats.step_diag_s
+             << " diag_write_s=" << perf_stats.diag_write_s
+             << " split_predict_count=" << perf_stats.split_predict_count
+             << " align_curr_predict_count="
+             << perf_stats.align_curr_predict_count
+             << " tail_predict_count=" << perf_stats.tail_predict_count
+             << " direct_predict_count=" << perf_stats.direct_predict_count
+             << endl;
+      }
+    }
   }
 
   if (options.constraints.enable_consistency_log) {
@@ -1168,5 +2689,30 @@ FusionResult RunFusion(const FusionOptions &options, const Dataset &dataset,
          << (reset.covariance_floor_applied ? "ON" : "OFF") << "\n";
   }
   diag.Finalize(result.time_axis.empty() ? 0.0 : result.time_axis.back());
+  if (perf_stats.enabled) {
+    const double wall_s =
+        DurationSeconds(SteadyClock::now() - perf_stats.wall_start);
+    cerr << "[Perf] final"
+         << " wall_s=" << wall_s
+         << " steps=" << perf_stats.imu_steps
+         << " gnss_idx=" << gnss_idx
+         << " exact_calls=" << perf_stats.gnss_exact_calls
+         << " gnss_update_calls=" << perf_stats.gnss_update_calls
+         << " gnss_samples=" << perf_stats.gnss_samples
+         << " predict_s=" << perf_stats.predict_s
+         << " gnss_exact_s=" << perf_stats.gnss_exact_s
+         << " gnss_update_s=" << perf_stats.gnss_update_s
+         << " zupt_s=" << perf_stats.zupt_s
+         << " gravity_diag_s=" << perf_stats.gravity_diag_s
+         << " uwb_s=" << perf_stats.uwb_s
+         << " step_diag_s=" << perf_stats.step_diag_s
+         << " diag_write_s=" << perf_stats.diag_write_s
+         << " split_predict_count=" << perf_stats.split_predict_count
+         << " align_curr_predict_count="
+         << perf_stats.align_curr_predict_count
+         << " tail_predict_count=" << perf_stats.tail_predict_count
+         << " direct_predict_count=" << perf_stats.direct_predict_count
+         << endl;
+  }
   return result;
 }

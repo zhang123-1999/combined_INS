@@ -262,7 +262,8 @@ def main() -> None:
     if odo_path is None or not odo_path.exists():
         raise FileNotFoundError("odo file is required and not found")
 
-    # Mounting angle (IMU->Vehicle)
+    # Stored mounting angle follows the same convention as the solver.
+    # The runtime C_b_v uses the inverse Euler rotation.
     if args.mounting_rpy_deg is not None:
         mounting_rpy_deg = np.array(args.mounting_rpy_deg, dtype=float)
     else:
@@ -273,7 +274,7 @@ def main() -> None:
         math.radians(mounting_rpy_deg[0]),
         math.radians(mounting_rpy_deg[1]),
         math.radians(mounting_rpy_deg[2]),
-    )
+    ).T
 
     # -------------------------
     # Truth

@@ -731,8 +731,6 @@ def plot_ecef_position(data, axes):
 STANDARD_STATE_FILES = [
     'state_gyro_bias.png',
     'state_accel_bias.png',
-    'state_gyro_scale.png',
-    'state_accel_scale.png',
     'state_mounting_odo_scale.png',
     'state_odo_lever_arm.png',
     'state_gnss_lever_arm.png',
@@ -748,6 +746,21 @@ STANDARD_SEGMENT_BAR_FILES = [
     'outage_segment_rmse_xyz_bar.png',
     'outage_segment_final_err_xyz_bar.png',
 ]
+OBSOLETE_LEGACY_FILES = [
+    '06_gyro_scale_factor.png',
+    '07_accel_scale_factor.png',
+]
+OBSOLETE_STANDARD_FILES = [
+    'state_gyro_scale.png',
+    'state_accel_scale.png',
+]
+
+
+def remove_obsolete_plot_files(out_dir, filenames):
+    for filename in filenames:
+        path = os.path.join(out_dir, filename)
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def load_truth_ecef_series(filepath):
@@ -897,8 +910,6 @@ def plot_standard_result_set(data, filepath, config_path, out_dir, outage_segmen
 
     radps_to_degh = 180.0 / np.pi * 3600.0
     ms2_to_mgal = 1e5
-    ppm_scale = 1.0 if data['_format'].iloc[0] == 'new' else 1e6
-
     if data['_format'].iloc[0] == 'new':
         sol_vel = data[['vn', 've', 'vd']].to_numpy(dtype=float)
         sol_att = data[['fused_roll', 'fused_pitch', 'fused_yaw']].to_numpy(dtype=float)
@@ -1039,34 +1050,6 @@ def plot_standard_result_set(data, filepath, config_path, out_dir, outage_segmen
     finalize_standard_figure(fig, os.path.join(out_dir, 'state_accel_bias.png'))
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
-    for ax, suffix, color, label in zip(
-        axes,
-        ['x', 'y', 'z'],
-        ['#1f77b4', '#d62728', '#2ca02c'],
-        ['陀螺比例因子 X [ppm]', '陀螺比例因子 Y [ppm]', '陀螺比例因子 Z [ppm]'],
-    ):
-        ax.plot(sol_t, data[f'sg_{suffix}'].to_numpy(dtype=float) * ppm_scale, color=color, linewidth=0.9)
-        ax.set_ylabel(label)
-        ax.grid(True, alpha=0.3)
-    axes[-1].set_xlabel('时间戳 [s]')
-    fig.suptitle('陀螺比例因子状态')
-    finalize_standard_figure(fig, os.path.join(out_dir, 'state_gyro_scale.png'))
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
-    for ax, suffix, color, label in zip(
-        axes,
-        ['x', 'y', 'z'],
-        ['#1f77b4', '#d62728', '#2ca02c'],
-        ['加计比例因子 X [ppm]', '加计比例因子 Y [ppm]', '加计比例因子 Z [ppm]'],
-    ):
-        ax.plot(sol_t, data[f'sa_{suffix}'].to_numpy(dtype=float) * ppm_scale, color=color, linewidth=0.9)
-        ax.set_ylabel(label)
-        ax.grid(True, alpha=0.3)
-    axes[-1].set_xlabel('时间戳 [s]')
-    fig.suptitle('加计比例因子状态')
-    finalize_standard_figure(fig, os.path.join(out_dir, 'state_accel_scale.png'))
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 8.5), sharex=True)
     if data['_format'].iloc[0] == 'new':
         axes[0].plot(sol_t, data['mounting_pitch'].to_numpy(dtype=float), color='#d62728', linewidth=0.9)
         axes[0].set_ylabel('安装俯仰角 [deg]')
@@ -1150,6 +1133,7 @@ def run_legacy_mode(data, filepath, config_path, explicit_output_dir=None):
 
     out_dir = explicit_output_dir or infer_legacy_output_dir(filepath)
     os.makedirs(out_dir, exist_ok=True)
+    remove_obsolete_plot_files(out_dir, OBSOLETE_LEGACY_FILES)
     print(f"图像将保存到: {os.path.abspath(out_dir)}")
 
     figure_names = []
@@ -1220,18 +1204,6 @@ def run_legacy_mode(data, filepath, config_path, explicit_output_dir=None):
     plot_accel_bias(data, axes5)
     figures.append(fig5)
     figure_names.append((fig5, '05_accel_bias.png'))
-
-    fig6 = create_figure('导航结果 — 陀螺仪比例因子')
-    axes6 = [fig6.add_subplot(3, 1, i) for i in range(1, 4)]
-    plot_scale_factor_gyro(data, axes6)
-    figures.append(fig6)
-    figure_names.append((fig6, '06_gyro_scale_factor.png'))
-
-    fig7 = create_figure('导航结果 — 加速度计比例因子')
-    axes7 = [fig7.add_subplot(3, 1, i) for i in range(1, 4)]
-    plot_scale_factor_accel(data, axes7)
-    figures.append(fig7)
-    figure_names.append((fig7, '07_accel_scale_factor.png'))
 
     if fmt == 'new':
         fig8 = create_figure('导航结果 — 安装角 & 里程计比例因子')
@@ -1328,6 +1300,8 @@ def run_standard_mode(data, filepath, config_path, output_dir, outage_segments_p
         raise ValueError('standard 模式必须通过 --output-dir 指定输出目录。')
     print(f"已加载 {len(data)} 条记录, 共 {data.shape[1]} 列")
     print(f"标准结果图输出目录: {os.path.abspath(output_dir)}")
+    os.makedirs(output_dir, exist_ok=True)
+    remove_obsolete_plot_files(output_dir, OBSOLETE_STANDARD_FILES)
     maybe_add_vehicle_velocity(data, config_path)
     plot_standard_result_set(
         data,

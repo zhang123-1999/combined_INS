@@ -146,7 +146,7 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
   Vector3d omega_in_b = C_bn.transpose() * omega_in_n;
   Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
-  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
   Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
   Vector3d omega_nb_b = omega_ib_corr - omega_in_b;
 
@@ -179,24 +179,24 @@ VelConstraintModel ComputeNhcModel(const State &state, const Matrix3d &C_b_v,
     }
   }
 
-  // H_bg = C_b^v * Skew(l) * diag(1-sg)
+  // H_bg = C_b^v * Skew(l) * diag((1+sg)^-1)
   Matrix3d H_bg = C_b_v * Skew(lever_arm) * sf_g.asDiagonal();
-  // H_sg = C_b^v * Skew(l) * diag(ω_ib^b-bg)
-  Matrix3d H_sg = C_b_v * Skew(lever_arm) * omega_ib_unbiased.asDiagonal();
+  // H_sg = C_b^v * Skew(l) * diag((ω_ib^b-bg) .* (1+sg)^-2)
+  Matrix3d H_sg =
+      C_b_v * Skew(lever_arm) *
+      (omega_ib_unbiased.cwiseProduct(sf_g.cwiseProduct(sf_g))).asDiagonal();
 
   model.H.block<2, 3>(0, StateIdx::kVel) = H_v.block<2, 3>(1, 0);
   model.H.block<2, 3>(0, StateIdx::kAtt) = H_theta.block<2, 3>(1, 0);
   model.H.block<2, 3>(0, StateIdx::kBg) = H_bg.block<2, 3>(1, 0);
   model.H.block<2, 3>(0, StateIdx::kSg) = H_sg.block<2, 3>(1, 0);
 
-  // H_alpha: 安装角微小旋转对 v_v 的影响
-  // 安装角 pitch 对应绕 vehicle-Y 轴旋转，mounting_yaw 对应绕 vehicle-Z 轴旋转
-  // ∂v_v / ∂mounting_pitch = e_Y × v_v,  e_Y = [0,1,0] 在 vehicle 系
-  // ∂v_v / ∂mounting_yaw  = e_Z × v_v,  e_Z = [0,0,1] 在 vehicle 系
+  // H_alpha: 存储的 mounting 参数对应 vehicle->IMU 欧拉角，运行时使用其逆旋转
+  // 构造 C_b^v，因此显式导数相对直接 C_b^v = R(rpy) 需多一个负号。
   Vector3d e_pitch_v(0.0, 1.0, 0.0);  // vehicle 系 Y 轴
   Vector3d e_yaw_v(0.0, 0.0, 1.0);   // vehicle 系 Z 轴
-  Vector3d dv_dpitch = e_pitch_v.cross(v_v);  // ∂v_v/∂mounting_pitch
-  Vector3d dv_dyaw = e_yaw_v.cross(v_v);      // ∂v_v/∂mounting_yaw
+  Vector3d dv_dpitch = -e_pitch_v.cross(v_v);  // ∂v_v/∂mounting_pitch
+  Vector3d dv_dyaw = -e_yaw_v.cross(v_v);      // ∂v_v/∂mounting_yaw
   // NHC 取 y 分量（行0）和 z 分量（行1）
   model.H(0, StateIdx::kMountPitch) = dv_dpitch(1);
   model.H(0, StateIdx::kMountYaw) = dv_dyaw(1);
@@ -257,7 +257,7 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
   Vector3d omega_in_b = C_bn.transpose() * omega_in_n;
   Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
-  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
   Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
   Vector3d omega_nb_b = omega_ib_corr - omega_in_b;
 
@@ -307,26 +307,26 @@ VelConstraintModel ComputeOdoModel(const State &state, double odo_speed,
   }
   model.H.block<1, 3>(0, StateIdx::kAtt) = s * H_theta_full.row(0);
 
-  // 3. H_bg = C_b^v * Skew(l) * diag(1-sg)
+  // 3. H_bg = C_b^v * Skew(l) * diag((1+sg)^-1)
   RowVector3d H_bg_phys =
       C_b_v.row(0) * Skew(lever_arm) * sf_g.asDiagonal();
   model.H.block<1, 3>(0, StateIdx::kBg) = s * H_bg_phys;
 
-  // 3b. H_sg = C_b^v * Skew(l) * diag(ω_ib^b-bg)
+  // 3b. H_sg = C_b^v * Skew(l) * diag((ω_ib^b-bg) .* (1+sg)^-2)
   RowVector3d H_sg_phys =
-      C_b_v.row(0) * Skew(lever_arm) * omega_ib_unbiased.asDiagonal();
+      C_b_v.row(0) * Skew(lever_arm) *
+      (omega_ib_unbiased.cwiseProduct(sf_g.cwiseProduct(sf_g))).asDiagonal();
   model.H.block<1, 3>(0, StateIdx::kSg) = s * H_sg_phys;
 
   // 4. H_scale = v_phys_x（标准雅可比）
   model.H(0, StateIdx::kOdoScale) = v_phys_v.x();
 
-  // 5. H_alpha: 安装角微小旋转对 v_phys_v 前向分量的影响
-  // ∂v_phys_v.x() / ∂mounting_pitch = (e_Y × v_phys_v).x()
-  // ∂v_phys_v.x() / ∂mounting_yaw   = (e_Z × v_phys_v).x()
+  // 5. H_alpha: 存储的 mounting 参数对应 vehicle->IMU 欧拉角，运行时使用其逆旋转
+  // 构造 C_b^v，因此显式导数相对直接 C_b^v = R(rpy) 需多一个负号。
   Vector3d e_pitch_v(0.0, 1.0, 0.0);
   Vector3d e_yaw_v(0.0, 0.0, 1.0);
-  Vector3d dv_dpitch = e_pitch_v.cross(v_phys_v);
-  Vector3d dv_dyaw = e_yaw_v.cross(v_phys_v);
+  Vector3d dv_dpitch = -e_pitch_v.cross(v_phys_v);
+  Vector3d dv_dyaw = -e_yaw_v.cross(v_phys_v);
   model.H(0, StateIdx::kMountPitch) = s * dv_dpitch(0);
   model.H(0, StateIdx::kMountYaw) = s * dv_dyaw(0);
 
@@ -430,7 +430,7 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
   Vector3d omega_en_n = OmegaEnNed(v_ned, llh.lat, llh.h);
   Vector3d omega_in_n = omega_ie_n + omega_en_n;
   Vector3d omega_ib_unbiased = omega_ib_b_raw - state.bg;
-  Vector3d sf_g = Vector3d::Ones() - state.sg;
+  Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
   Vector3d omega_ib_corr = sf_g.cwiseProduct(omega_ib_unbiased);
   Vector3d omega_nb_b = omega_ib_corr - C_bn.transpose() * omega_in_n;
 
@@ -459,13 +459,14 @@ UwbModel ComputeGnssVelocityModel(const State &state, const Vector3d &z_gnss_vel
     model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
   }
 
-  // H_bg = C_b^n * Skew(l_gnss) * diag(1-sg)
+  // H_bg = C_b^n * Skew(l_gnss) * diag((1+sg)^-1)
   model.H.block<3, 3>(0, StateIdx::kBg) =
       C_bn * Skew(state.gnss_lever_arm) * sf_g.asDiagonal();
 
-  // H_sg = C_b^n * Skew(l_gnss) * diag(ω_ib^b-bg)
+  // H_sg = C_b^n * Skew(l_gnss) * diag((ω_ib^b-bg) .* (1+sg)^-2)
   model.H.block<3, 3>(0, StateIdx::kSg) =
-      C_bn * Skew(state.gnss_lever_arm) * omega_ib_unbiased.asDiagonal();
+      C_bn * Skew(state.gnss_lever_arm) *
+      (omega_ib_unbiased.cwiseProduct(sf_g.cwiseProduct(sf_g))).asDiagonal();
 
   // H_gnss_lever = C_b^n * Skew(ω_nb^b)
   model.H.block<3, 3>(0, StateIdx::kGnssLever) = C_bn * Skew(omega_nb_b);

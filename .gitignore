@@ -19,6 +19,8 @@
 # Python 脚本
 !scripts/
 !scripts/**/
+!tests/
+!tests/**/
 !plot_navresult.py
 
 # ---------- 放行文件类型 ----------

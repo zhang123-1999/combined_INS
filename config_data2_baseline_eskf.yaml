@@ -1,4 +1,4 @@
-﻿common:
+common:
   anchors:
     mode: fixed
     margin: 1.0
@@ -14,7 +14,7 @@ fusion:
   gnss_path: dataset/data2/rtk.txt
   enable_gnss_velocity: false
   uwb_path: ''
-  output_path: SOL_data2_baseline_eskf.txt
+  output_path: output/data2_baseline_current/SOL_data2_baseline_current.txt
   starttime: 528076.0
   finaltime: 530488.9
   uwb_anchor_schedule:
@@ -26,8 +26,14 @@ fusion:
     omega_threshold: 0.05
     accel_threshold: 0.5
   ablation:
-    disable_mounting_roll: true
-    disable_gnss_lever_z: true
+    disable_mounting_roll: false
+    disable_gnss_lever_z: false
+    disable_mounting: false
+    disable_odo_lever_arm: false
+    disable_gnss_lever_arm: false
+    disable_odo_scale: false
+    disable_gyro_scale: true
+    disable_accel_scale: true
   noise:
     sigma_acc: 0.05
     sigma_gyro: 0.005
@@ -36,20 +42,20 @@ fusion:
     sigma_sg: 0.0005
     sigma_sa: 0.0005
     sigma_odo_scale: 1.0e-05
-    sigma_mounting: 0.0001
-    sigma_mounting_roll: 0.0001
-    sigma_mounting_pitch: 0.0001
-    sigma_mounting_yaw: 0.0001
-    sigma_lever_arm: 0.001
-    sigma_gnss_lever_arm: 0.001
+    sigma_mounting: 1.0e-06
+    sigma_mounting_roll: 1.0e-06
+    sigma_mounting_pitch: 1.0e-06
+    sigma_mounting_yaw: 1.0e-06
+    sigma_lever_arm: 1.0e-05
+    sigma_gnss_lever_arm: 1.0e-06
     sigma_gnss_pos: 1
     sigma_uwb: 100.0
-    markov_corr_time: 3600
+    markov_corr_time: 3600.0
   constraints:
     enable_nhc: true
     enable_odo: true
     enable_zupt: false
-    sigma_odo: 0.1
+    sigma_odo: 3.0
     odo_lever_arm:
     - 0.0
     - 0.0
@@ -57,17 +63,17 @@ fusion:
     imu_mounting_angle:
     - 0.0
     - 0.0
-    - 1.38
-    sigma_nhc_y: 0.1
-    sigma_nhc_z: 0.1
+    - 0.0
+    sigma_nhc_y: 3.0
+    sigma_nhc_z: 3.0
     sigma_zupt: 0.05
     zupt_min_duration: 0.5
     zupt_max_speed: 0.2
     zupt_max_gyro: 0.05
     zupt_max_acc: 0.5
-    enable_diagnostics: false
+    enable_diagnostics: true
     nhc_max_abs_v: 5.0
-    enable_consistency_log: false
+    enable_consistency_log: true
     enable_covariance_floor: false
     freeze_extrinsics_when_weak_excitation: false
     odo_min_update_interval: 0.0
@@ -77,6 +83,7 @@ fusion:
     p_floor_att_deg: 0.01
     p_floor_mounting_deg: 0.1
     p_floor_bg_var: 1.0e-08
+    enable_mechanism_log: false
   init:
     use_truth_pva: true
     init_pos_lla:
@@ -107,7 +114,7 @@ fusion:
     - 0.0
     - 0.0
     - 0.0
-    odo_scale: 0.0
+    odo_scale: 1.0
     mounting_pitch0: 0.0
     mounting_yaw0: 0.0
     lever_arm0:
@@ -115,9 +122,9 @@ fusion:
     - 0.0
     - 0.0
     gnss_lever_arm0:
-    - 0.0
-    - 0.0
-    - 0.0
+    - 0.15
+    - -0.22
+    - -1.15
     std_pos:
     - 0.1
     - 0.1
@@ -131,32 +138,32 @@ fusion:
     - 0.1
     - 0.1
     std_ba:
-    - 0.0005
-    - 0.0005
-    - 0.0005
+    - 0.022500000000000003
+    - 0.0022500000000000003
+    - 0.0011250000000000001
     std_bg:
-    - 0.000233
-    - 0.000233
-    - 0.000233
+    - 0.000727220521664304
+    - 0.000545415391248228
+    - 0.000727220521664304
     std_sg:
-    - 0.0005
-    - 0.0005
-    - 0.0005
+    - 0.0015
+    - 0.0022500000000000003
+    - 0.006
     std_sa:
-    - 0.0005
-    - 0.0005
-    - 0.0005
+    - 0.0039
+    - 0.00315
+    - 0.00135
     std_odo_scale: 0.005
-    std_mounting_pitch: 0.5
-    std_mounting_yaw: 0.3
+    std_mounting_pitch: 3.0
+    std_mounting_yaw: 3.0
     std_lever_arm:
     - 0.1
     - 0.1
     - 0.1
     std_gnss_lever_arm:
-    - 0.1
-    - 0.1
-    - 0.1
+    - 1.0
+    - 1.0
+    - 1.0
     P0_diag:
     - 0.01
     - 0.01
@@ -167,32 +174,110 @@ fusion:
     - 0.0001
     - 0.0001
     - 0.0001
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
-    - 2.5e-07
+    - 0.0005062500000000001
+    - 5.062500000000001e-06
+    - 1.2656250000000003e-06
+    - 5.288496871297024e-07
+    - 2.974779490104576e-07
+    - 5.288496871297024e-07
+    - 2.25e-06
+    - 5.062500000000001e-06
+    - 3.6e-05
+    - 1.5209999999999998e-05
+    - 9.9225e-06
+    - 1.8225000000000001e-06
     - 2.5e-05
-    - 0.0001
-    - 0.09
+    - 0.0027415567780803775
+    - 0.0027415567780803775
+    - 0.0027415567780803775
     - 0.01
     - 0.01
     - 0.01
-    - 0.01
-    - 0.01
-    - 0.01
-    - 1.0e-06
+    - 1.0
+    - 1.0
+    - 1.0
+    runtime_truth_anchor_pva: false
+    runtime_truth_anchor_position: false
+    runtime_truth_anchor_velocity: false
+    runtime_truth_anchor_attitude: false
+    runtime_truth_anchor_gnss_only: false
+    use_legacy_mounting_base_logic: false
+    lever_arm_source: init
+    strict_extrinsic_conflict: false
+    mounting_roll0: 0.0
+    std_mounting_roll: 3.0
+  state_series_output_path: output/data2_baseline_current/state_series_data2_baseline_current.csv
+  gnss_schedule:
+    enabled: true
+    enabled_windows:
+    - start_time: 528076.0
+      end_time: 528866.0
+    - start_time: 528956.0
+      end_time: 529046.0
+    - start_time: 529136.0
+      end_time: 529226.0
+    - start_time: 529316.0
+      end_time: 529406.0
+    - start_time: 529496.0
+      end_time: 529586.0
+    - start_time: 529676.0
+      end_time: 529766.0
+    - start_time: 529856.0
+      end_time: 529946.0
+    - start_time: 530036.0
+      end_time: 530126.0
+    - start_time: 530216.0
+      end_time: 530306.0
+    - start_time: 530396.0
+      end_time: 530486.0
+  runtime_phases:
+  - name: phase1_ins_gnss_freeze_mounting_odo_states
+    start_time: 528076.0
+    end_time: 528276.0
+    ablation:
+      disable_odo_scale: true
+      disable_mounting: true
+      disable_odo_lever_arm: true
+    constraints:
+      enable_odo: false
+      enable_nhc: false
+  - name: phase2_cov_seed
+    start_time: 528276.0
+    end_time: 528276.02
+    ablation:
+      disable_gnss_lever_arm: true
+    constraints:
+      enable_odo: true
+      enable_nhc: true
+      enable_covariance_floor: true
+      p_floor_mounting_deg: 3.0
+      p_floor_odo_scale_var: 0.0001
+      p_floor_lever_arm_vec:
+      - 0.16
+      - 0.16
+      - 0.16
+  - name: phase2_ins_gnss_odo_nhc_freeze_gnss_lever
+    start_time: 528276.02
+    end_time: 528776.0
+    ablation:
+      disable_gnss_lever_arm: true
+    constraints:
+      enable_odo: true
+      enable_nhc: true
+  - name: phase3_periodic_gnss_outage_freeze_calibrated_extrinsics
+    start_time: 528776.0
+    end_time: 530488.9
+    ablation:
+      disable_gnss_lever_arm: true
+      disable_odo_scale: true
+      disable_mounting: true
+      disable_odo_lever_arm: true
+    constraints:
+      enable_odo: true
+      enable_nhc: true
 generator:
   pos_path: dataset/data2_converted/POS_converted.txt
   output_path: UWB_simulated.txt
   uwb_hz: 10.0
   sigma: 0.1
   seed: 42
-

@@ -12,6 +12,9 @@ Primary research goals:
 Current baseline reference:
 
 - Config: `config_data2_baseline_eskf.yaml`
+- Official output dir: `output/data2_baseline_current/`
+- Official runner: `scripts/analysis/run_data2_baseline_current.py`
+- Supporting / historical sweep seed: `config_data2_research_seed_eskf.yaml`
 - Core system: INS/GNSS/ODO/NHC integrated navigation
 - State dimension: 31 (`kStateDim = 31`)
 - Filter modes in code: standard ESKF and InEKF switch (`fusion.fej.enable`)

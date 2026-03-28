@@ -1,5 +1,6 @@
 #include "app/fusion.h"
 
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 
@@ -7,6 +8,69 @@
 
 using namespace std;
 using namespace Eigen;
+
+namespace {
+
+Vector4d InterpolateQuaternionNlerp(const Vector4d &q0_in,
+                                    const Vector4d &q1_in,
+                                    double alpha) {
+  Vector4d q0 = NormalizeQuat(q0_in);
+  Vector4d q1 = NormalizeQuat(q1_in);
+  if (q0.dot(q1) < 0.0) {
+    q1 = -q1;
+  }
+  return NormalizeQuat((1.0 - alpha) * q0 + alpha * q1);
+}
+
+}  // namespace
+
+bool InterpolateTruthPva(const TruthData &truth, double t, int &cursor,
+                         Vector3d &p_out, Vector3d &v_out, Vector4d &q_out) {
+  const int n = static_cast<int>(truth.timestamps.size());
+  if (n <= 0 || truth.positions.rows() != n || truth.velocities.rows() != n ||
+      truth.quaternions.rows() != n) {
+    return false;
+  }
+
+  if (n == 1 || t <= truth.timestamps(0)) {
+    p_out = truth.positions.row(0).transpose();
+    v_out = truth.velocities.row(0).transpose();
+    q_out = NormalizeQuat(truth.quaternions.row(0).transpose());
+    cursor = 0;
+    return true;
+  }
+  if (t >= truth.timestamps(n - 1)) {
+    p_out = truth.positions.row(n - 1).transpose();
+    v_out = truth.velocities.row(n - 1).transpose();
+    q_out = NormalizeQuat(truth.quaternions.row(n - 1).transpose());
+    cursor = std::max(0, n - 2);
+    return true;
+  }
+
+  cursor = std::clamp(cursor, 0, std::max(0, n - 2));
+  while (cursor + 1 < n - 1 && truth.timestamps(cursor + 1) < t) {
+    ++cursor;
+  }
+  while (cursor > 0 && truth.timestamps(cursor) > t) {
+    --cursor;
+  }
+
+  const int i0 = cursor;
+  const int i1 = std::min(i0 + 1, n - 1);
+  const double t0 = truth.timestamps(i0);
+  const double t1 = truth.timestamps(i1);
+  const double alpha =
+      (t1 > t0 + 1.0e-12) ? std::clamp((t - t0) / (t1 - t0), 0.0, 1.0) : 0.0;
+
+  p_out = (1.0 - alpha) * truth.positions.row(i0).transpose() +
+          alpha * truth.positions.row(i1).transpose();
+  v_out = (1.0 - alpha) * truth.velocities.row(i0).transpose() +
+          alpha * truth.velocities.row(i1).transpose();
+  q_out = InterpolateQuaternionNlerp(truth.quaternions.row(i0).transpose(),
+                                     truth.quaternions.row(i1).transpose(),
+                                     alpha);
+  return true;
+}
 
 /**
  * 初始化名义状态与协方差矩阵。
@@ -41,12 +105,16 @@ bool InitializeState(const FusionOptions &options, const vector<ImuData> &imu,
       cout << "error: 初始化失败，真值数据为空\n";
       return false;
     }
-    x0.p = truth.positions.row(0).transpose();
-    x0.v = truth.velocities.row(0).transpose();
-    x0.q = truth.quaternions.row(0).transpose().normalized();
+    int truth_cursor = 0;
+    if (!InterpolateTruthPva(truth, imu.front().t, truth_cursor, x0.p, x0.v,
+                             x0.q)) {
+      cout << "error: 初始化失败，真值插值失败\n";
+      return false;
+    }
 
     cout << "[Init] Mode: Truth\n";
-    cout << "[Init] Truth file index 0 at t=" << fixed << setprecision(6) << truth.timestamps(0) << "\n";
+    cout << "[Init] Truth aligned to imu.front().t=" << fixed
+         << setprecision(6) << imu.front().t << "\n";
     cout << "[Init] Truth P0: " << x0.p.transpose() << "\n";
   } else {
     // 手动初始化 (LLA -> ECEF, NED -> ECEF, RPY -> Quaternion)

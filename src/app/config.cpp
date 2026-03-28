@@ -169,6 +169,75 @@ vector<int> ParseAnchorIndices(const YAML::Node &node, const string &field) {
   return indices;
 }
 
+vector<pair<double, double>> ParseTimeWindows(const YAML::Node &node,
+                                              const string &field) {
+  if (!node || !node.IsSequence()) {
+    ThrowConfigError("error: " + field + " 必须是时间窗数组");
+  }
+  vector<pair<double, double>> windows;
+  windows.reserve(node.size());
+  for (size_t i = 0; i < node.size(); ++i) {
+    const YAML::Node window = node[i];
+    if (!window.IsMap()) {
+      ThrowConfigError("error: " + field + "[" + to_string(i) +
+                       "] 必须为 map");
+    }
+    if (!window["start_time"] || !window["end_time"]) {
+      ThrowConfigError("error: " + field + "[" + to_string(i) +
+                       "] 必须提供 start_time/end_time");
+    }
+    const double start_time = window["start_time"].as<double>();
+    const double end_time = window["end_time"].as<double>();
+    windows.emplace_back(start_time, end_time);
+  }
+  return windows;
+}
+
+void ValidateTimeWindows(const vector<pair<double, double>> &windows,
+                         const string &field) {
+  double prev_end = -std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < windows.size(); ++i) {
+    const double start_time = windows[i].first;
+    const double end_time = windows[i].second;
+    if (!std::isfinite(start_time) || !std::isfinite(end_time)) {
+      ThrowConfigError("error: " + field +
+                       " start/end 必须为有限数值");
+    }
+    if (start_time < 0.0 || end_time < 0.0) {
+      ThrowConfigError("error: " + field +
+                       " start/end 必须为非负");
+    }
+    if (end_time < start_time) {
+      ThrowConfigError("error: " + field +
+                       " end_time 必须不小于 start_time");
+    }
+    if (i > 0 && start_time < prev_end) {
+      ThrowConfigError("error: " + field +
+                       " 不允许重叠时间窗");
+    }
+    prev_end = end_time;
+  }
+}
+
+bool IsOverrideVectorProvided(const Vector3d &value) {
+  return value.allFinite();
+}
+
+void ValidateOverrideVectorNoise(const Vector3d &value, const string &field,
+                                 const string &context) {
+  if (!IsOverrideVectorProvided(value)) {
+    if ((value.array().isFinite()).any()) {
+      ThrowConfigError("error: " + context + "." + field +
+                       " 必须三轴同时提供，或全部省略");
+    }
+    return;
+  }
+  if ((value.array() < 0.0).any()) {
+    ThrowConfigError("error: " + context + "." + field +
+                     " 必须为逐轴非负有限数值");
+  }
+}
+
 /**
  * 校验基站配置有效性。
  * @param config 基站配置
@@ -298,6 +367,10 @@ GnssSchedule ApplyGnssScheduleNode(const GnssSchedule &base,
   if (node["head_ratio"]) {
     out.head_ratio = node["head_ratio"].as<double>();
   }
+  if (node["enabled_windows"]) {
+    out.enabled_windows = ParseTimeWindows(
+        node["enabled_windows"], context + ".gnss_schedule.enabled_windows");
+  }
   return out;
 }
 
@@ -306,6 +379,11 @@ GnssSchedule ApplyGnssScheduleNode(const GnssSchedule &base,
  */
 void ValidateGnssSchedule(const GnssSchedule &config, const string &context) {
   if (!config.enabled) {
+    return;
+  }
+  if (!config.enabled_windows.empty()) {
+    ValidateTimeWindows(config.enabled_windows,
+                        context + ".gnss_schedule.enabled_windows");
     return;
   }
   if (config.head_ratio <= 0.0 || config.head_ratio > 1.0) {
@@ -422,6 +500,22 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["nhc_max_abs_v"]) {
     out.nhc_max_abs_v = node["nhc_max_abs_v"].as<double>();
   }
+  if (node["nhc_disable_below_forward_speed"]) {
+    out.nhc_disable_below_forward_speed =
+        node["nhc_disable_below_forward_speed"].as<double>();
+  }
+  if (node["nhc_admission_velocity_source"]) {
+    out.nhc_admission_velocity_source =
+        node["nhc_admission_velocity_source"].as<string>();
+  }
+  if (node["disable_nhc_when_weak_excitation"]) {
+    out.disable_nhc_when_weak_excitation =
+        node["disable_nhc_when_weak_excitation"].as<bool>();
+  }
+  if (node["disable_odo_when_weak_excitation"]) {
+    out.disable_odo_when_weak_excitation =
+        node["disable_odo_when_weak_excitation"].as<bool>();
+  }
   if (node["enable_nis_gating"]) {
     out.enable_nis_gating = node["enable_nis_gating"].as<bool>();
   }
@@ -455,6 +549,14 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["p_floor_att_deg"]) {
     out.p_floor_att_deg = node["p_floor_att_deg"].as<double>();
   }
+  if (node["p_floor_odo_scale_var"]) {
+    out.p_floor_odo_scale_var = node["p_floor_odo_scale_var"].as<double>();
+  }
+  if (node["p_floor_lever_arm_vec"]) {
+    out.p_floor_lever_arm_vec =
+        ParseVector3(node["p_floor_lever_arm_vec"],
+                     context + ".constraints.p_floor_lever_arm_vec");
+  }
   if (node["p_floor_mounting_deg"]) {
     out.p_floor_mounting_deg = node["p_floor_mounting_deg"].as<double>();
   }
@@ -473,6 +575,39 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   }
   if (node["excitation_min_lateral_acc"]) {
     out.excitation_min_lateral_acc = node["excitation_min_lateral_acc"].as<double>();
+  }
+  if (node["enable_bgz_observability_gate"]) {
+    out.enable_bgz_observability_gate =
+        node["enable_bgz_observability_gate"].as<bool>();
+  }
+  if (node["bgz_gate_apply_to_odo"]) {
+    out.bgz_gate_apply_to_odo = node["bgz_gate_apply_to_odo"].as<bool>();
+  }
+  if (node["bgz_gate_apply_to_nhc"]) {
+    out.bgz_gate_apply_to_nhc = node["bgz_gate_apply_to_nhc"].as<bool>();
+  }
+  if (node["bgz_gate_forward_speed_min"]) {
+    out.bgz_gate_forward_speed_min =
+        node["bgz_gate_forward_speed_min"].as<double>();
+  }
+  if (node["bgz_gate_yaw_rate_min_deg_s"]) {
+    out.bgz_gate_yaw_rate_min_deg_s =
+        node["bgz_gate_yaw_rate_min_deg_s"].as<double>();
+  }
+  if (node["bgz_gate_lateral_acc_min"]) {
+    out.bgz_gate_lateral_acc_min =
+        node["bgz_gate_lateral_acc_min"].as<double>();
+  }
+  if (node["bgz_gate_min_scale"]) {
+    out.bgz_gate_min_scale = node["bgz_gate_min_scale"].as<double>();
+  }
+  if (node["enable_bgz_covariance_forgetting"]) {
+    out.enable_bgz_covariance_forgetting =
+        node["enable_bgz_covariance_forgetting"].as<bool>();
+  }
+  if (node["bgz_cov_forgetting_tau_s"]) {
+    out.bgz_cov_forgetting_tau_s =
+        node["bgz_cov_forgetting_tau_s"].as<double>();
   }
   if (node["odo_time_offset"]) {
     out.odo_time_offset = node["odo_time_offset"].as<double>();
@@ -516,6 +651,9 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["enable_consistency_log"]) {
     out.enable_consistency_log = node["enable_consistency_log"].as<bool>();
   }
+  if (node["enable_nhc_admission_log"]) {
+    out.enable_nhc_admission_log = node["enable_nhc_admission_log"].as<bool>();
+  }
   if (node["enable_mechanism_log"]) {
     out.enable_mechanism_log = node["enable_mechanism_log"].as<bool>();
   }
@@ -525,6 +663,14 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["mechanism_log_post_gnss_only"]) {
     out.mechanism_log_post_gnss_only =
         node["mechanism_log_post_gnss_only"].as<bool>();
+  }
+  if (node["mechanism_log_start_time"]) {
+    out.mechanism_log_start_time =
+        node["mechanism_log_start_time"].as<double>();
+  }
+  if (node["mechanism_log_end_time"]) {
+    out.mechanism_log_end_time =
+        node["mechanism_log_end_time"].as<double>();
   }
   if (node["diag_gravity_min_duration"]) {
     out.diag_gravity_min_duration =
@@ -559,6 +705,75 @@ ConstraintConfig ApplyConstraintsNode(const ConstraintConfig &base,
   if (node["diag_first_divergence_speed"]) {
     out.diag_first_divergence_speed =
         node["diag_first_divergence_speed"].as<double>();
+  }
+  if (node["debug_odo_disable_bgz_jacobian"]) {
+    out.debug_odo_disable_bgz_jacobian =
+        node["debug_odo_disable_bgz_jacobian"].as<bool>();
+  }
+  if (node["debug_odo_disable_bgz_state_update"]) {
+    out.debug_odo_disable_bgz_state_update =
+        node["debug_odo_disable_bgz_state_update"].as<bool>();
+  }
+  if (node["debug_nhc_disable_bgz_state_update"]) {
+    out.debug_nhc_disable_bgz_state_update =
+        node["debug_nhc_disable_bgz_state_update"].as<bool>();
+  }
+  if (node["debug_run_odo_before_nhc"]) {
+    out.debug_run_odo_before_nhc =
+        node["debug_run_odo_before_nhc"].as<bool>();
+  }
+  if (node["debug_nhc_disable_start_time"]) {
+    out.debug_nhc_disable_start_time =
+        node["debug_nhc_disable_start_time"].as<double>();
+  }
+  if (node["debug_nhc_disable_end_time"]) {
+    out.debug_nhc_disable_end_time =
+        node["debug_nhc_disable_end_time"].as<double>();
+  }
+  if (node["debug_odo_disable_start_time"]) {
+    out.debug_odo_disable_start_time =
+        node["debug_odo_disable_start_time"].as<double>();
+  }
+  if (node["debug_odo_disable_end_time"]) {
+    out.debug_odo_disable_end_time =
+        node["debug_odo_disable_end_time"].as<double>();
+  }
+  if (node["debug_gnss_lever_arm_disable_start_time"]) {
+    out.debug_gnss_lever_arm_disable_start_time =
+        node["debug_gnss_lever_arm_disable_start_time"].as<double>();
+  }
+  if (node["debug_gnss_lever_arm_disable_end_time"]) {
+    out.debug_gnss_lever_arm_disable_end_time =
+        node["debug_gnss_lever_arm_disable_end_time"].as<double>();
+  }
+  if (node["debug_nhc_enable_after_time"]) {
+    out.debug_nhc_enable_after_time =
+        node["debug_nhc_enable_after_time"].as<double>();
+  }
+  if (node["debug_mounting_yaw_enable_after_time"]) {
+    out.debug_mounting_yaw_enable_after_time =
+        node["debug_mounting_yaw_enable_after_time"].as<double>();
+  }
+  if (node["debug_reset_bg_z_state_and_cov_after_time"]) {
+    out.debug_reset_bg_z_state_and_cov_after_time =
+        node["debug_reset_bg_z_state_and_cov_after_time"].as<double>();
+  }
+  if (node["debug_reset_bg_z_value"]) {
+    out.debug_reset_bg_z_value =
+        node["debug_reset_bg_z_value"].as<double>();
+  }
+  if (node["debug_seed_mount_yaw_bgz_cov_before_first_nhc"]) {
+    out.debug_seed_mount_yaw_bgz_cov_before_first_nhc =
+        node["debug_seed_mount_yaw_bgz_cov_before_first_nhc"].as<double>();
+  }
+  if (node["debug_seed_bg_z_before_first_nhc"]) {
+    out.debug_seed_bg_z_before_first_nhc =
+        node["debug_seed_bg_z_before_first_nhc"].as<double>();
+  }
+  if (node["debug_seed_bg_z_att_cov_before_first_nhc"]) {
+    out.debug_seed_bg_z_att_cov_before_first_nhc = ParseVector3(
+        node["debug_seed_bg_z_att_cov_before_first_nhc"],
+        context + ".constraints.debug_seed_bg_z_att_cov_before_first_nhc");
   }
   if (out.mechanism_log_stride <= 0) {
     ThrowConfigError("error: " + context + ".constraints.mechanism_log_stride 必须为正整数");
@@ -656,6 +871,9 @@ StateAblationConfig ApplyAblationNode(const StateAblationConfig &base,
   if (node["disable_odo_scale"]) {
     out.disable_odo_scale = node["disable_odo_scale"].as<bool>();
   }
+  if (node["disable_accel_bias"]) {
+    out.disable_accel_bias = node["disable_accel_bias"].as<bool>();
+  }
   if (node["disable_gyro_bias"]) {
     out.disable_gyro_bias = node["disable_gyro_bias"].as<bool>();
   }
@@ -670,6 +888,12 @@ StateAblationConfig ApplyAblationNode(const StateAblationConfig &base,
   }
   if (node["disable_mounting_roll"]) {
     out.disable_mounting_roll = node["disable_mounting_roll"].as<bool>();
+  }
+  if (node["disable_mounting_pitch"]) {
+    out.disable_mounting_pitch = node["disable_mounting_pitch"].as<bool>();
+  }
+  if (node["disable_mounting_yaw"]) {
+    out.disable_mounting_yaw = node["disable_mounting_yaw"].as<bool>();
   }
   return out;
 }
@@ -694,6 +918,298 @@ PostGnssAblationConfig ApplyPostGnssAblationNode(
   }
   out.ablation = ApplyAblationNode(out.ablation, node, context + ".post_gnss_ablation");
   return out;
+}
+
+RuntimeConstraintOverride ApplyRuntimeConstraintOverrideNode(
+    const RuntimeConstraintOverride &base, const YAML::Node &node,
+    const string &context) {
+  RuntimeConstraintOverride out = base;
+  if (!node) {
+    return out;
+  }
+  if (!node.IsMap()) {
+    ThrowConfigError("error: " + context + ".constraints 必须为 map");
+  }
+  if (node["enable_nhc"]) {
+    out.has_enable_nhc = true;
+    out.enable_nhc = node["enable_nhc"].as<bool>();
+  }
+  if (node["enable_odo"]) {
+    out.has_enable_odo = true;
+    out.enable_odo = node["enable_odo"].as<bool>();
+  }
+  if (node["enable_covariance_floor"]) {
+    out.has_enable_covariance_floor = true;
+    out.enable_covariance_floor = node["enable_covariance_floor"].as<bool>();
+  }
+  if (node["gnss_pos_update_mode"]) {
+    out.has_gnss_pos_update_mode = true;
+    out.gnss_pos_update_mode = node["gnss_pos_update_mode"].as<string>();
+  }
+  if (node["enable_nis_gating"]) {
+    out.has_enable_nis_gating = true;
+    out.enable_nis_gating = node["enable_nis_gating"].as<bool>();
+  }
+  if (node["odo_nis_gate_prob"]) {
+    out.has_odo_nis_gate_prob = true;
+    out.odo_nis_gate_prob = node["odo_nis_gate_prob"].as<double>();
+  }
+  if (node["nhc_nis_gate_prob"]) {
+    out.has_nhc_nis_gate_prob = true;
+    out.nhc_nis_gate_prob = node["nhc_nis_gate_prob"].as<double>();
+  }
+  if (node["p_floor_odo_scale_var"]) {
+    out.has_p_floor_odo_scale_var = true;
+    out.p_floor_odo_scale_var = node["p_floor_odo_scale_var"].as<double>();
+  }
+  if (node["p_floor_lever_arm_vec"]) {
+    out.has_p_floor_lever_arm_vec = true;
+    out.p_floor_lever_arm_vec =
+        ParseVector3(node["p_floor_lever_arm_vec"],
+                     context + ".constraints.p_floor_lever_arm_vec");
+  }
+  if (node["p_floor_mounting_deg"]) {
+    out.has_p_floor_mounting_deg = true;
+    out.p_floor_mounting_deg = node["p_floor_mounting_deg"].as<double>();
+  }
+  return out;
+}
+
+RuntimeNoiseOverride ApplyRuntimeNoiseOverrideNode(
+    const RuntimeNoiseOverride &base, const YAML::Node &node,
+    const string &context) {
+  RuntimeNoiseOverride out = base;
+  if (!node) {
+    return out;
+  }
+  if (!node.IsMap()) {
+    ThrowConfigError("error: " + context + ".noise 必须为 map");
+  }
+  if (node["sigma_uwb"]) {
+    out.sigma_uwb = node["sigma_uwb"].as<double>();
+  }
+  if (node["sigma_acc"]) {
+    out.sigma_acc = node["sigma_acc"].as<double>();
+  }
+  if (node["sigma_gyro"]) {
+    out.sigma_gyro = node["sigma_gyro"].as<double>();
+  }
+  if (node["sigma_ba"]) {
+    out.sigma_ba = node["sigma_ba"].as<double>();
+  }
+  if (node["sigma_ba_vec"]) {
+    out.sigma_ba_vec =
+        ParseVector3(node["sigma_ba_vec"], context + ".noise.sigma_ba_vec");
+  }
+  if (node["sigma_bg"]) {
+    out.sigma_bg = node["sigma_bg"].as<double>();
+  }
+  if (node["sigma_bg_vec"]) {
+    out.sigma_bg_vec =
+        ParseVector3(node["sigma_bg_vec"], context + ".noise.sigma_bg_vec");
+  }
+  if (node["sigma_odo_scale"]) {
+    out.sigma_odo_scale = node["sigma_odo_scale"].as<double>();
+  }
+  if (node["sigma_mounting"]) {
+    out.sigma_mounting = node["sigma_mounting"].as<double>();
+  }
+  if (node["sigma_mounting_roll"]) {
+    out.sigma_mounting_roll = node["sigma_mounting_roll"].as<double>();
+  }
+  if (node["sigma_mounting_pitch"]) {
+    out.sigma_mounting_pitch = node["sigma_mounting_pitch"].as<double>();
+  }
+  if (node["sigma_mounting_yaw"]) {
+    out.sigma_mounting_yaw = node["sigma_mounting_yaw"].as<double>();
+  }
+  if (node["sigma_sg"]) {
+    out.sigma_sg = node["sigma_sg"].as<double>();
+  }
+  if (node["sigma_sg_vec"]) {
+    out.sigma_sg_vec =
+        ParseVector3(node["sigma_sg_vec"], context + ".noise.sigma_sg_vec");
+  }
+  if (node["sigma_sa"]) {
+    out.sigma_sa = node["sigma_sa"].as<double>();
+  }
+  if (node["sigma_sa_vec"]) {
+    out.sigma_sa_vec =
+        ParseVector3(node["sigma_sa_vec"], context + ".noise.sigma_sa_vec");
+  }
+  if (node["markov_corr_time"]) {
+    out.markov_corr_time = node["markov_corr_time"].as<double>();
+  }
+  if (node["disable_nominal_ba_bg_decay"]) {
+    out.has_disable_nominal_ba_bg_decay = true;
+    out.disable_nominal_ba_bg_decay = node["disable_nominal_ba_bg_decay"].as<bool>();
+  }
+  if (node["sigma_lever_arm"]) {
+    out.sigma_lever_arm = node["sigma_lever_arm"].as<double>();
+  }
+  if (node["sigma_lever_arm_vec"]) {
+    out.sigma_lever_arm_vec = ParseVector3(
+        node["sigma_lever_arm_vec"], context + ".noise.sigma_lever_arm_vec");
+  }
+  if (node["sigma_gnss_lever_arm"]) {
+    out.sigma_gnss_lever_arm = node["sigma_gnss_lever_arm"].as<double>();
+  }
+  if (node["sigma_gnss_lever_arm_vec"]) {
+    out.sigma_gnss_lever_arm_vec = ParseVector3(
+        node["sigma_gnss_lever_arm_vec"],
+        context + ".noise.sigma_gnss_lever_arm_vec");
+  }
+  if (node["sigma_gnss_pos"]) {
+    out.sigma_gnss_pos = node["sigma_gnss_pos"].as<double>();
+  }
+  return out;
+}
+
+void ValidateRuntimeNoiseOverride(const RuntimeNoiseOverride &noise,
+                                  const string &context) {
+  const auto validate_nonnegative = [&](double value, const string &field) {
+    if (!std::isfinite(value)) {
+      return;
+    }
+    if (value < 0.0) {
+      ThrowConfigError("error: " + context + "." + field +
+                       " 必须为非负有限数值");
+    }
+  };
+  validate_nonnegative(noise.sigma_acc, "noise.sigma_acc");
+  validate_nonnegative(noise.sigma_gyro, "noise.sigma_gyro");
+  validate_nonnegative(noise.sigma_ba, "noise.sigma_ba");
+  validate_nonnegative(noise.sigma_bg, "noise.sigma_bg");
+  validate_nonnegative(noise.sigma_sg, "noise.sigma_sg");
+  validate_nonnegative(noise.sigma_sa, "noise.sigma_sa");
+  validate_nonnegative(noise.sigma_odo_scale, "noise.sigma_odo_scale");
+  validate_nonnegative(noise.sigma_mounting, "noise.sigma_mounting");
+  validate_nonnegative(noise.sigma_lever_arm, "noise.sigma_lever_arm");
+  validate_nonnegative(noise.sigma_gnss_lever_arm,
+                       "noise.sigma_gnss_lever_arm");
+  validate_nonnegative(noise.sigma_uwb, "noise.sigma_uwb");
+  validate_nonnegative(noise.sigma_gnss_pos, "noise.sigma_gnss_pos");
+  validate_nonnegative(noise.markov_corr_time, "noise.markov_corr_time");
+  const auto validate_optional_mounting = [&](double value,
+                                              const string &field) {
+    if (!std::isfinite(value)) {
+      return;
+    }
+    if (value < 0.0 && std::abs(value + 1.0) > 1e-12) {
+      ThrowConfigError("error: " + context + "." + field +
+                       " 必须为非负，或 -1 表示回退");
+    }
+  };
+  validate_optional_mounting(noise.sigma_mounting_roll,
+                             "noise.sigma_mounting_roll");
+  validate_optional_mounting(noise.sigma_mounting_pitch,
+                             "noise.sigma_mounting_pitch");
+  validate_optional_mounting(noise.sigma_mounting_yaw,
+                             "noise.sigma_mounting_yaw");
+  ValidateOverrideVectorNoise(noise.sigma_ba_vec, "noise.sigma_ba_vec",
+                              context);
+  ValidateOverrideVectorNoise(noise.sigma_bg_vec, "noise.sigma_bg_vec",
+                              context);
+  ValidateOverrideVectorNoise(noise.sigma_sg_vec, "noise.sigma_sg_vec",
+                              context);
+  ValidateOverrideVectorNoise(noise.sigma_sa_vec, "noise.sigma_sa_vec",
+                              context);
+  ValidateOverrideVectorNoise(noise.sigma_lever_arm_vec,
+                              "noise.sigma_lever_arm_vec", context);
+  ValidateOverrideVectorNoise(noise.sigma_gnss_lever_arm_vec,
+                              "noise.sigma_gnss_lever_arm_vec", context);
+}
+
+vector<RuntimePhaseConfig> ApplyRuntimePhasesNode(
+    const vector<RuntimePhaseConfig> &base, const YAML::Node &node,
+    const string &context) {
+  vector<RuntimePhaseConfig> out = base;
+  if (!node) {
+    return out;
+  }
+  if (!node.IsSequence()) {
+    ThrowConfigError("error: " + context + ".runtime_phases 必须为数组");
+  }
+  out.clear();
+  out.reserve(node.size());
+  for (size_t i = 0; i < node.size(); ++i) {
+    const YAML::Node phase_node = node[i];
+    if (!phase_node.IsMap()) {
+      ThrowConfigError("error: " + context + ".runtime_phases[" +
+                       to_string(i) + "] 必须为 map");
+    }
+    RuntimePhaseConfig phase;
+    if (phase_node["enabled"]) {
+      phase.enabled = phase_node["enabled"].as<bool>();
+    }
+    if (phase_node["name"]) {
+      phase.name = phase_node["name"].as<string>();
+    }
+    if (!phase_node["start_time"] || !phase_node["end_time"]) {
+      ThrowConfigError("error: " + context + ".runtime_phases[" +
+                       to_string(i) +
+                       "] 必须提供 start_time/end_time");
+    }
+    phase.start_time = phase_node["start_time"].as<double>();
+    phase.end_time = phase_node["end_time"].as<double>();
+    phase.ablation = ApplyAblationNode(
+        phase.ablation, phase_node["ablation"],
+        context + ".runtime_phases[" + to_string(i) + "]");
+    phase.constraints = ApplyRuntimeConstraintOverrideNode(
+        phase.constraints, phase_node["constraints"],
+        context + ".runtime_phases[" + to_string(i) + "]");
+    phase.noise = ApplyRuntimeNoiseOverrideNode(
+        phase.noise, phase_node["noise"],
+        context + ".runtime_phases[" + to_string(i) + "]");
+    if (phase.name.empty()) {
+      phase.name = "phase_" + to_string(i);
+    }
+    out.push_back(phase);
+  }
+  return out;
+}
+
+void ValidateRuntimePhases(const vector<RuntimePhaseConfig> &phases,
+                           const string &context) {
+  for (size_t i = 0; i < phases.size(); ++i) {
+    const RuntimePhaseConfig &phase = phases[i];
+    const string prefix = context + ".runtime_phases[" + to_string(i) + "]";
+    if (!std::isfinite(phase.start_time) || !std::isfinite(phase.end_time)) {
+      ThrowConfigError("error: " + prefix +
+                       " start_time/end_time 必须为有限数值");
+    }
+    if (phase.start_time < 0.0 || phase.end_time < 0.0) {
+      ThrowConfigError("error: " + prefix +
+                       " start_time/end_time 必须为非负");
+    }
+    if (phase.end_time < phase.start_time) {
+      ThrowConfigError("error: " + prefix +
+                       " end_time 必须不小于 start_time");
+    }
+    if (phase.constraints.has_odo_nis_gate_prob &&
+        (!std::isfinite(phase.constraints.odo_nis_gate_prob) ||
+         phase.constraints.odo_nis_gate_prob <= 0.0 ||
+         phase.constraints.odo_nis_gate_prob >= 1.0)) {
+      ThrowConfigError("error: " + prefix +
+                       ".constraints.odo_nis_gate_prob 必须在 (0,1) 内");
+    }
+    if (phase.constraints.has_nhc_nis_gate_prob &&
+        (!std::isfinite(phase.constraints.nhc_nis_gate_prob) ||
+         phase.constraints.nhc_nis_gate_prob <= 0.0 ||
+         phase.constraints.nhc_nis_gate_prob >= 1.0)) {
+      ThrowConfigError("error: " + prefix +
+                       ".constraints.nhc_nis_gate_prob 必须在 (0,1) 内");
+    }
+    if (phase.constraints.has_gnss_pos_update_mode &&
+        phase.constraints.gnss_pos_update_mode != "joint" &&
+        phase.constraints.gnss_pos_update_mode != "stage_nonpos_then_pos" &&
+        phase.constraints.gnss_pos_update_mode != "position_only") {
+      ThrowConfigError("error: " + prefix +
+                       ".constraints.gnss_pos_update_mode 仅支持 joint / "
+                       "stage_nonpos_then_pos / position_only");
+    }
+    ValidateRuntimeNoiseOverride(phase.noise, prefix);
+  }
 }
 
 /**
@@ -721,6 +1237,16 @@ void ValidateConstraintsConfig(const ConstraintConfig &config,
     ThrowConfigError("error: " + context +
                      ".constraints nhc_max_abs_v 必须为非负");
   }
+  if (config.nhc_disable_below_forward_speed < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints nhc_disable_below_forward_speed 必须为非负");
+  }
+  if (config.nhc_admission_velocity_source != "v_b" &&
+      config.nhc_admission_velocity_source != "v_wheel_b" &&
+      config.nhc_admission_velocity_source != "v_v") {
+    ThrowConfigError("error: " + context +
+                     ".constraints.nhc_admission_velocity_source 仅支持 v_b/v_wheel_b/v_v");
+  }
   if (config.odo_nis_gate_prob <= 0.0 || config.odo_nis_gate_prob >= 1.0 ||
       config.nhc_nis_gate_prob <= 0.0 || config.nhc_nis_gate_prob >= 1.0) {
     ThrowConfigError("error: " + context +
@@ -739,15 +1265,46 @@ void ValidateConstraintsConfig(const ConstraintConfig &config,
                      ".constraints robust_kernel 仅支持 huber/cauchy");
   }
   if (config.p_floor_pos_var < 0.0 || config.p_floor_vel_var < 0.0 ||
-      config.p_floor_att_deg < 0.0 || config.p_floor_mounting_deg < 0.0 ||
-      config.p_floor_bg_var < 0.0) {
+      config.p_floor_att_deg < 0.0 || config.p_floor_odo_scale_var < 0.0 ||
+      config.p_floor_mounting_deg < 0.0 || config.p_floor_bg_var < 0.0) {
     ThrowConfigError("error: " + context +
                      ".constraints 协方差下界参数必须为非负");
+  }
+  if (!config.p_floor_lever_arm_vec.allFinite() ||
+      (config.p_floor_lever_arm_vec.array() < 0.0).any()) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.p_floor_lever_arm_vec 必须为非负有限三维向量");
   }
   if (config.excitation_min_speed < 0.0 || config.excitation_min_yaw_rate < 0.0 ||
       config.excitation_min_lateral_acc < 0.0) {
     ThrowConfigError("error: " + context +
                      ".constraints excitation_min_* 必须为非负");
+  }
+  if (!std::isfinite(config.bgz_gate_forward_speed_min) ||
+      config.bgz_gate_forward_speed_min <= 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.bgz_gate_forward_speed_min 必须为正有限数值");
+  }
+  if (!std::isfinite(config.bgz_gate_yaw_rate_min_deg_s) ||
+      config.bgz_gate_yaw_rate_min_deg_s <= 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.bgz_gate_yaw_rate_min_deg_s 必须为正有限数值");
+  }
+  if (!std::isfinite(config.bgz_gate_lateral_acc_min) ||
+      config.bgz_gate_lateral_acc_min <= 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.bgz_gate_lateral_acc_min 必须为正有限数值");
+  }
+  if (!std::isfinite(config.bgz_gate_min_scale) ||
+      config.bgz_gate_min_scale < 0.0 || config.bgz_gate_min_scale > 1.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.bgz_gate_min_scale 必须在 [0,1] 内");
+  }
+  if (config.enable_bgz_covariance_forgetting &&
+      (!std::isfinite(config.bgz_cov_forgetting_tau_s) ||
+       config.bgz_cov_forgetting_tau_s <= 0.0)) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.bgz_cov_forgetting_tau_s 在启用 forgetting 时必须为正有限数值");
   }
   if (config.odo_min_update_interval < 0.0 ||
       config.nhc_min_update_interval < 0.0) {
@@ -800,6 +1357,78 @@ void ValidateConstraintsConfig(const ConstraintConfig &config,
     ThrowConfigError("error: " + context +
                      ".constraints diag_first_divergence_* 必须为非负");
   }
+  const auto validate_optional_window_pair = [&](double start_time,
+                                                 double end_time,
+                                                 const string &label) {
+    const bool start_finite = std::isfinite(start_time);
+    const bool end_finite = std::isfinite(end_time);
+    if (start_finite != end_finite) {
+      ThrowConfigError("error: " + context + ".constraints." + label +
+                       " start/end 必须同时提供，或同时为 NaN");
+    }
+    if (!start_finite) {
+      return;
+    }
+    if (start_time < 0.0 || end_time < 0.0) {
+      ThrowConfigError("error: " + context + ".constraints." + label +
+                       " start/end 必须为非负或 NaN");
+    }
+    if (end_time < start_time) {
+      ThrowConfigError("error: " + context + ".constraints." + label +
+                       " end_time 必须不小于 start_time");
+    }
+  };
+  validate_optional_window_pair(config.debug_nhc_disable_start_time,
+                                config.debug_nhc_disable_end_time,
+                                "debug_nhc_disable");
+  validate_optional_window_pair(config.debug_odo_disable_start_time,
+                                config.debug_odo_disable_end_time,
+                                "debug_odo_disable");
+  validate_optional_window_pair(
+      config.debug_gnss_lever_arm_disable_start_time,
+      config.debug_gnss_lever_arm_disable_end_time,
+      "debug_gnss_lever_arm_disable");
+  if (std::isfinite(config.debug_nhc_enable_after_time) &&
+      config.debug_nhc_enable_after_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.debug_nhc_enable_after_time 必须为非负或 NaN");
+  }
+  if (std::isfinite(config.debug_mounting_yaw_enable_after_time) &&
+      config.debug_mounting_yaw_enable_after_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.debug_mounting_yaw_enable_after_time 必须为非负或 NaN");
+  }
+  if (std::isfinite(config.mechanism_log_start_time) &&
+      config.mechanism_log_start_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.mechanism_log_start_time 必须为非负或 NaN");
+  }
+  if (std::isfinite(config.mechanism_log_end_time) &&
+      config.mechanism_log_end_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.mechanism_log_end_time 必须为非负或 NaN");
+  }
+  if (std::isfinite(config.mechanism_log_start_time) &&
+      std::isfinite(config.mechanism_log_end_time) &&
+      config.mechanism_log_end_time + 1e-9 < config.mechanism_log_start_time) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.mechanism_log_end_time 不能早于 mechanism_log_start_time");
+  }
+  if (std::isfinite(config.debug_reset_bg_z_state_and_cov_after_time) &&
+      config.debug_reset_bg_z_state_and_cov_after_time < 0.0) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.debug_reset_bg_z_state_and_cov_after_time 必须为非负或 NaN");
+  }
+  if (std::isfinite(config.debug_reset_bg_z_state_and_cov_after_time) &&
+      !std::isfinite(config.debug_reset_bg_z_value)) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.debug_reset_bg_z_value 在启用 debug_reset_bg_z_state_and_cov_after_time 时必须为有限数值");
+  }
+  if (!std::isfinite(config.debug_reset_bg_z_state_and_cov_after_time) &&
+      std::isfinite(config.debug_reset_bg_z_value)) {
+    ThrowConfigError("error: " + context +
+                     ".constraints.debug_reset_bg_z_value 不能单独提供，需同时设置 debug_reset_bg_z_state_and_cov_after_time");
+  }
 }
 
 void ValidateFejConfig(const FejConfig &config, const string &context) {
@@ -850,6 +1479,25 @@ InitConfig ApplyInitNode(const InitConfig &base, const YAML::Node &node,
   }
   if (node["use_truth_pva"]) {
     out.use_truth_pva = node["use_truth_pva"].as<bool>();
+  }
+  if (node["runtime_truth_anchor_pva"]) {
+    out.runtime_truth_anchor_pva = node["runtime_truth_anchor_pva"].as<bool>();
+  }
+  if (node["runtime_truth_anchor_position"]) {
+    out.runtime_truth_anchor_position =
+        node["runtime_truth_anchor_position"].as<bool>();
+  }
+  if (node["runtime_truth_anchor_velocity"]) {
+    out.runtime_truth_anchor_velocity =
+        node["runtime_truth_anchor_velocity"].as<bool>();
+  }
+  if (node["runtime_truth_anchor_attitude"]) {
+    out.runtime_truth_anchor_attitude =
+        node["runtime_truth_anchor_attitude"].as<bool>();
+  }
+  if (node["runtime_truth_anchor_gnss_only"]) {
+    out.runtime_truth_anchor_gnss_only =
+        node["runtime_truth_anchor_gnss_only"].as<bool>();
   }
   if (node["ba0"]) {
     out.ba0 = ParseVector3(node["ba0"], context + ".init.ba0");
@@ -1020,6 +1668,9 @@ NoiseParams ApplyNoiseNode(const NoiseParams &base, const YAML::Node &node,
   if (node["markov_corr_time"]) {
     out.markov_corr_time = node["markov_corr_time"].as<double>();
   }
+  if (node["disable_nominal_ba_bg_decay"]) {
+    out.disable_nominal_ba_bg_decay = node["disable_nominal_ba_bg_decay"].as<bool>();
+  }
   if (node["sigma_lever_arm"]) {
     out.sigma_lever_arm = node["sigma_lever_arm"].as<double>();
   }
@@ -1160,6 +1811,62 @@ FusionOptions LoadFusionOptions(const string &path) {
   opt.state_series_output_path = f["state_series_output_path"]
                                      ? f["state_series_output_path"].as<string>()
                                      : opt.state_series_output_path;
+  opt.first_update_debug_output_path =
+      f["first_update_debug_output_path"]
+          ? f["first_update_debug_output_path"].as<string>()
+          : opt.first_update_debug_output_path;
+  opt.gnss_update_debug_output_path =
+      f["gnss_update_debug_output_path"]
+          ? f["gnss_update_debug_output_path"].as<string>()
+          : opt.gnss_update_debug_output_path;
+  opt.predict_debug_output_path =
+      f["predict_debug_output_path"]
+          ? f["predict_debug_output_path"].as<string>()
+          : opt.predict_debug_output_path;
+  opt.predict_debug_start_time =
+      f["predict_debug_start_time"]
+          ? f["predict_debug_start_time"].as<double>()
+          : opt.predict_debug_start_time;
+  opt.predict_debug_end_time =
+      f["predict_debug_end_time"]
+          ? f["predict_debug_end_time"].as<double>()
+          : opt.predict_debug_end_time;
+  opt.gnss_pos_update_mode =
+      f["gnss_pos_update_mode"]
+          ? f["gnss_pos_update_mode"].as<string>()
+          : opt.gnss_pos_update_mode;
+  opt.gnss_pos_position_gain_scale =
+      f["gnss_pos_position_gain_scale"]
+          ? f["gnss_pos_position_gain_scale"].as<double>()
+          : opt.gnss_pos_position_gain_scale;
+  opt.gnss_pos_lgx_from_y_gain_scale =
+      f["gnss_pos_lgx_from_y_gain_scale"]
+          ? f["gnss_pos_lgx_from_y_gain_scale"].as<double>()
+          : opt.gnss_pos_lgx_from_y_gain_scale;
+  opt.gnss_pos_lgy_from_y_gain_scale =
+      f["gnss_pos_lgy_from_y_gain_scale"]
+          ? f["gnss_pos_lgy_from_y_gain_scale"].as<double>()
+          : opt.gnss_pos_lgy_from_y_gain_scale;
+  opt.gnss_pos_turn_rate_threshold_deg_s =
+      f["gnss_pos_turn_rate_threshold_deg_s"]
+          ? f["gnss_pos_turn_rate_threshold_deg_s"].as<double>()
+          : opt.gnss_pos_turn_rate_threshold_deg_s;
+  opt.gnss_pos_positive_turn_position_gain_scale =
+      f["gnss_pos_positive_turn_position_gain_scale"]
+          ? f["gnss_pos_positive_turn_position_gain_scale"].as<double>()
+          : opt.gnss_pos_positive_turn_position_gain_scale;
+  opt.gnss_pos_negative_turn_position_gain_scale =
+      f["gnss_pos_negative_turn_position_gain_scale"]
+          ? f["gnss_pos_negative_turn_position_gain_scale"].as<double>()
+          : opt.gnss_pos_negative_turn_position_gain_scale;
+  opt.gnss_pos_positive_turn_lgy_from_y_gain_scale =
+      f["gnss_pos_positive_turn_lgy_from_y_gain_scale"]
+          ? f["gnss_pos_positive_turn_lgy_from_y_gain_scale"].as<double>()
+          : opt.gnss_pos_positive_turn_lgy_from_y_gain_scale;
+  opt.gnss_pos_negative_turn_lgy_from_y_gain_scale =
+      f["gnss_pos_negative_turn_lgy_from_y_gain_scale"]
+          ? f["gnss_pos_negative_turn_lgy_from_y_gain_scale"].as<double>()
+          : opt.gnss_pos_negative_turn_lgy_from_y_gain_scale;
   opt.start_time = f["starttime"] ? f["starttime"].as<double>() : opt.start_time;
   opt.final_time = f["finaltime"] ? f["finaltime"].as<double>() : opt.final_time;
 
@@ -1178,6 +1885,8 @@ FusionOptions LoadFusionOptions(const string &path) {
   opt.ablation = ApplyAblationNode(opt.ablation, f["ablation"], "fusion");
   opt.post_gnss_ablation = ApplyPostGnssAblationNode(
       opt.post_gnss_ablation, f["post_gnss_ablation"], "fusion");
+  opt.runtime_phases =
+      ApplyRuntimePhasesNode(opt.runtime_phases, f["runtime_phases"], "fusion");
   opt.init = ApplyInitNode(opt.init, f["init"], "fusion");
   opt.noise = ApplyNoiseNode(opt.noise, f["noise"], "fusion");
 
@@ -1186,7 +1895,48 @@ FusionOptions LoadFusionOptions(const string &path) {
   ValidateNoiseParams(opt.noise, "fusion");
   ValidateConstraintsConfig(opt.constraints, "fusion");
   ValidateFejConfig(opt.fej, "fusion");
+  ValidateRuntimePhases(opt.runtime_phases, "fusion");
   ValidateInitConfig(opt.init, "fusion");
+  if (!std::isfinite(opt.gnss_pos_position_gain_scale) ||
+      opt.gnss_pos_position_gain_scale < 0.0) {
+    ThrowConfigError(
+        "error: fusion.gnss_pos_position_gain_scale 必须为非负有限数值");
+  }
+  if (!std::isfinite(opt.gnss_pos_lgx_from_y_gain_scale) ||
+      opt.gnss_pos_lgx_from_y_gain_scale < 0.0) {
+    ThrowConfigError(
+        "error: fusion.gnss_pos_lgx_from_y_gain_scale 必须为非负有限数值");
+  }
+  if (!std::isfinite(opt.gnss_pos_lgy_from_y_gain_scale) ||
+      opt.gnss_pos_lgy_from_y_gain_scale < 0.0) {
+    ThrowConfigError(
+        "error: fusion.gnss_pos_lgy_from_y_gain_scale 必须为非负有限数值");
+  }
+  if (!std::isfinite(opt.gnss_pos_turn_rate_threshold_deg_s) ||
+      opt.gnss_pos_turn_rate_threshold_deg_s < 0.0) {
+    ThrowConfigError(
+        "error: fusion.gnss_pos_turn_rate_threshold_deg_s 必须为非负有限数值");
+  }
+  auto validate_optional_gain = [](double value, const string &name) {
+    if (!std::isfinite(value) || (value < 0.0 && value != -1.0)) {
+      ThrowConfigError("error: " + name + " 必须为非负有限数值，或使用 -1 表示禁用");
+    }
+  };
+  validate_optional_gain(opt.gnss_pos_positive_turn_position_gain_scale,
+                         "fusion.gnss_pos_positive_turn_position_gain_scale");
+  validate_optional_gain(opt.gnss_pos_negative_turn_position_gain_scale,
+                         "fusion.gnss_pos_negative_turn_position_gain_scale");
+  validate_optional_gain(opt.gnss_pos_positive_turn_lgy_from_y_gain_scale,
+                         "fusion.gnss_pos_positive_turn_lgy_from_y_gain_scale");
+  validate_optional_gain(opt.gnss_pos_negative_turn_lgy_from_y_gain_scale,
+                         "fusion.gnss_pos_negative_turn_lgy_from_y_gain_scale");
+  if (opt.gnss_pos_update_mode != "joint" &&
+      opt.gnss_pos_update_mode != "stage_nonpos_then_pos" &&
+      opt.gnss_pos_update_mode != "position_only") {
+    ThrowConfigError(
+        "error: fusion.gnss_pos_update_mode 仅支持 joint / "
+        "stage_nonpos_then_pos / position_only");
+  }
 
   return opt;
 }

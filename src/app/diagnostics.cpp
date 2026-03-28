@@ -26,6 +26,30 @@ namespace {
 
 constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
 
+string VectorToCsvField(const VectorXd &vec) {
+  ostringstream oss;
+  oss << "[";
+  for (Eigen::Index i = 0; i < vec.size(); ++i) {
+    if (i > 0) oss << ";";
+    oss << setprecision(12) << vec(i);
+  }
+  oss << "]";
+  return oss.str();
+}
+
+string MatrixToCsvField(const MatrixXd &mat) {
+  ostringstream oss;
+  oss << "[";
+  for (Eigen::Index r = 0; r < mat.rows(); ++r) {
+    for (Eigen::Index c = 0; c < mat.cols(); ++c) {
+      if (r > 0 || c > 0) oss << ";";
+      oss << setprecision(12) << mat(r, c);
+    }
+  }
+  oss << "]";
+  return oss.str();
+}
+
 // ---------- ZUPT 静止检测（仅 IMU，用于诊断） ----------
 bool DetectZuptImuOnly(const ImuData &imu, const ConstraintConfig &config) {
   if (imu.dt <= 1e-9) return false;
@@ -151,6 +175,101 @@ double SafeNisFromInnovation(const MatrixXd &S, const VectorXd &y) {
   return SafeQuadraticInfo(S, y);
 }
 
+double SafeCovValue(const MatrixXd &P, int row, int col) {
+  if (row < 0 || col < 0 || row >= P.rows() || col >= P.cols()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  double value = P(row, col);
+  return std::isfinite(value) ? value : numeric_limits<double>::quiet_NaN();
+}
+
+double SafeCorrValue(const MatrixXd &P, int row, int col) {
+  if (row < 0 || col < 0 || row >= P.rows() || col >= P.cols()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  double var_row = P(row, row);
+  double var_col = P(col, col);
+  if (!std::isfinite(var_row) || !std::isfinite(var_col) ||
+      var_row <= 1e-30 || var_col <= 1e-30) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  double cov = P(row, col);
+  if (!std::isfinite(cov)) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return cov / std::sqrt(var_row * var_col);
+}
+
+VectorXd SafeMeasurementNumerator(const MatrixXd &P_prior, const MatrixXd &H,
+                                  int state_idx) {
+  if (state_idx < 0 || state_idx >= P_prior.rows() ||
+      P_prior.rows() != P_prior.cols() || H.cols() != P_prior.cols()) {
+    return VectorXd();
+  }
+  return (P_prior.row(state_idx) * H.transpose()).transpose();
+}
+
+VectorXd SafeStateBlockNumerator(const MatrixXd &P_prior, const MatrixXd &H,
+                                 int row_idx, int block_start, int block_dim) {
+  if (row_idx < 0 || row_idx >= P_prior.rows() || block_dim <= 0 ||
+      block_start < 0 || block_start + block_dim > P_prior.cols() ||
+      P_prior.rows() != P_prior.cols() || H.cols() != P_prior.cols()) {
+    return VectorXd();
+  }
+  Eigen::RowVectorXd p_row =
+      P_prior.block(row_idx, block_start, 1, block_dim);
+  MatrixXd h_block = H.block(0, block_start, H.rows(), block_dim);
+  return (p_row * h_block.transpose()).transpose();
+}
+
+VectorXd SafeCovRowBlock(const MatrixXd &P, int row_idx, int block_start,
+                         int block_dim) {
+  if (row_idx < 0 || row_idx >= P.rows() || block_dim <= 0 ||
+      block_start < 0 || block_start + block_dim > P.cols() ||
+      P.rows() != P.cols()) {
+    return VectorXd();
+  }
+  return P.block(row_idx, block_start, 1, block_dim).transpose();
+}
+
+VectorXd SafeGainRow(const MatrixXd &K, int state_idx) {
+  if (state_idx < 0 || state_idx >= K.rows()) {
+    return VectorXd();
+  }
+  return K.row(state_idx).transpose();
+}
+
+double SafeCovarianceDeltaLeft(const MatrixXd &P_prior, const MatrixXd &H,
+                               const MatrixXd &K, int row_idx, int col_idx) {
+  const VectorXd k_row = SafeGainRow(K, row_idx);
+  const VectorXd num_col = SafeMeasurementNumerator(P_prior, H, col_idx);
+  if (k_row.size() == 0 || num_col.size() == 0 || k_row.size() != num_col.size()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return -k_row.dot(num_col);
+}
+
+double SafeCovarianceDeltaRight(const MatrixXd &P_prior, const MatrixXd &H,
+                                const MatrixXd &K, int row_idx, int col_idx) {
+  const VectorXd num_row = SafeMeasurementNumerator(P_prior, H, row_idx);
+  const VectorXd k_col = SafeGainRow(K, col_idx);
+  if (num_row.size() == 0 || k_col.size() == 0 || num_row.size() != k_col.size()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return -num_row.dot(k_col);
+}
+
+double SafeCovarianceDeltaGain(const MatrixXd &S, const MatrixXd &K, int row_idx,
+                               int col_idx) {
+  const VectorXd k_row = SafeGainRow(K, row_idx);
+  const VectorXd k_col = SafeGainRow(K, col_idx);
+  if (k_row.size() == 0 || k_col.size() == 0 || S.rows() != S.cols() ||
+      S.rows() != k_row.size() || S.cols() != k_col.size()) {
+    return numeric_limits<double>::quiet_NaN();
+  }
+  return k_row.dot(S * k_col);
+}
+
 // ---------- 状态日志条目 ----------
 struct StateDiagLog {
   double t, dt;
@@ -244,6 +363,14 @@ struct DiagnosticsEngine::Impl {
   double gnss_split_t = numeric_limits<double>::infinity();
   double gnss_tol = 0.0;
 
+  ofstream first_update_file;
+  bool first_gnss_pos_recorded = false;
+  ofstream gnss_update_file;
+  ofstream predict_debug_file;
+  size_t predict_debug_count = 0;
+  double predict_debug_start_t = -numeric_limits<double>::infinity();
+  double predict_debug_end_t = numeric_limits<double>::infinity();
+
   // NHC 跳过警告
   bool nhc_skip_warned = false;
 
@@ -291,7 +418,23 @@ struct DiagnosticsEngine::Impl {
     }
   }
 
-  bool ShouldLogMechanism(const string &tag) {
+  bool IsMechanismTimeEnabled(double t) const {
+    const double start_time = config.mechanism_log_start_time;
+    const double end_time = config.mechanism_log_end_time;
+    const double tol = 1.0e-9;
+    if (std::isfinite(start_time) && t + tol < start_time) {
+      return false;
+    }
+    if (std::isfinite(end_time) && t - tol > end_time) {
+      return false;
+    }
+    return true;
+  }
+
+  bool ShouldLogMechanism(const string &tag, double t) {
+    if (!IsMechanismTimeEnabled(t)) {
+      return false;
+    }
     size_t *seen = nullptr;
     if (TagMatches(tag, "NHC")) {
       seen = &mechanism_seen_nhc;
@@ -342,6 +485,14 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
   impl_->mechanism_enabled = impl_->config.enable_mechanism_log;
   impl_->mechanism_stride = static_cast<size_t>(max(1, impl_->config.mechanism_log_stride));
   impl_->gnss_tol = options.gating.time_tolerance;
+  impl_->predict_debug_start_t =
+      std::isfinite(options.predict_debug_start_time)
+          ? options.predict_debug_start_time
+          : -numeric_limits<double>::infinity();
+  impl_->predict_debug_end_t =
+      std::isfinite(options.predict_debug_end_time)
+          ? options.predict_debug_end_time
+          : numeric_limits<double>::infinity();
   if (options.gnss_schedule.enabled && !dataset.imu.empty() &&
       dataset.imu.back().t > dataset.imu.front().t) {
     double t0_nav = dataset.imu.front().t;
@@ -435,10 +586,120 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
           << "tag,t_meas,t_state,post_gnss,used_true_iekf,y_dim,y_norm,nis,s_trace,"
           << "dx_att_z,dx_bg_z,dx_mount_yaw,"
           << "k_row_att_z_norm,k_row_bg_z_norm,k_row_mount_yaw_norm,"
+          << "k_att_z_vec,k_bg_z_vec,k_mount_yaw_vec,"
           << "h_col_att_z_norm,h_col_bg_z_norm,h_col_mount_yaw_norm,"
           << "h_block_att_norm,h_block_bg_norm,h_block_mount_norm,"
           << "info_att_z,info_bg_z,info_mount_yaw,info_heading_trace,"
+          << "num_att_z_vec,num_bg_z_vec,num_mount_yaw_vec,"
+          << "num_bg_z_from_vel_vec,num_bg_z_from_att_vec,"
+          << "num_bg_z_from_bg_vec,num_bg_z_from_sg_vec,"
+          << "num_bg_z_from_mount_vec,num_bg_z_from_lever_vec,"
+          << "p_row_bg_z_att_vec,p_row_bg_z_bg_vec,p_row_bg_z_mount_vec,"
+          << "h_att_x_vec,h_att_y_vec,h_att_z_vec,"
+          << "h_bg_x_vec,h_bg_y_vec,h_bg_z_vec,"
+          << "h_mount_roll_vec,h_mount_pitch_vec,h_mount_yaw_vec,"
+          << "num_bg_z_from_att_x_vec,num_bg_z_from_att_y_vec,"
+          << "num_bg_z_from_att_z_vec,"
+          << "num_bg_z_from_bg_x_vec,num_bg_z_from_bg_y_vec,"
+          << "num_bg_z_from_bg_z_vec,"
+          << "num_bg_z_from_mount_roll_vec,num_bg_z_from_mount_pitch_vec,"
+          << "num_bg_z_from_mount_yaw_vec,"
+          << "prior_cov_att_z_bg_z,prior_corr_att_z_bg_z,"
+          << "prior_cov_mount_yaw_bg_z,prior_corr_mount_yaw_bg_z,"
+          << "delta_cov_att_z_bg_z_left,delta_cov_att_z_bg_z_right,"
+          << "delta_cov_att_z_bg_z_gain,delta_cov_att_z_bg_z_total,"
+          << "delta_cov_mount_yaw_bg_z_left,delta_cov_mount_yaw_bg_z_right,"
+          << "delta_cov_mount_yaw_bg_z_gain,delta_cov_mount_yaw_bg_z_total,"
+          << "post_cov_att_z_bg_z,post_corr_att_z_bg_z,"
+          << "post_cov_mount_yaw_bg_z,post_corr_mount_yaw_bg_z,"
           << "bg_z_before,bg_z_after,mount_yaw_before,mount_yaw_after\n";
+    }
+  }
+
+  if (!options.first_update_debug_output_path.empty()) {
+    fs::path first_update_path(options.first_update_debug_output_path);
+    if (!first_update_path.parent_path().empty()) {
+      fs::create_directories(first_update_path.parent_path());
+    }
+    impl_->first_update_file.open(first_update_path, ios::out | ios::trunc);
+    if (impl_->first_update_file.is_open()) {
+      impl_->first_update_file << fixed << setprecision(9);
+      impl_->first_update_file
+          << "tag,gnss_axis,gnss_t,state_t,used_true_iekf,"
+          << "lever_before,lever_after,dx_gnss_lever,"
+          << "state_p_before_ecef,state_v_before_ecef,state_q_before_wxyz,"
+          << "state_p_after_ecef,"
+          << "y_vec,h_gnss_lever_vec,k_gnss_lever_vec\n";
+    }
+  }
+
+  if (!options.gnss_update_debug_output_path.empty()) {
+    fs::path gnss_update_path(options.gnss_update_debug_output_path);
+    if (!gnss_update_path.parent_path().empty()) {
+      fs::create_directories(gnss_update_path.parent_path());
+    }
+    impl_->gnss_update_file.open(gnss_update_path, ios::out | ios::trunc);
+    if (impl_->gnss_update_file.is_open()) {
+      impl_->gnss_update_file << fixed << setprecision(9);
+      impl_->gnss_update_file
+          << "tag,gnss_t,state_t,used_true_iekf,"
+          << "y_x,y_y,y_z,y_norm,"
+          << "state_p_before_x,state_p_before_y,state_p_before_z,"
+          << "state_q_before_w,state_q_before_x,state_q_before_y,state_q_before_z,"
+          << "state_v_before_x,state_v_before_y,state_v_before_z,"
+          << "state_p_after_x,state_p_after_y,state_p_after_z,"
+          << "state_v_after_x,state_v_after_y,state_v_after_z,"
+          << "state_q_after_w,state_q_after_x,state_q_after_y,state_q_after_z,"
+          << "lever_before_x,lever_before_y,lever_before_z,"
+          << "dx_pos_x,dx_pos_y,dx_pos_z,"
+          << "dx_vel_x,dx_vel_y,dx_vel_z,"
+          << "dx_att_x,dx_att_y,dx_att_z,"
+          << "dx_ba_x,dx_ba_y,dx_ba_z,"
+          << "dx_bg_x,dx_bg_y,dx_bg_z,"
+          << "dx_sg_x,dx_sg_y,dx_sg_z,"
+          << "dx_sa_x,dx_sa_y,dx_sa_z,"
+          << "dx_gnss_lever_x,dx_gnss_lever_y,dx_gnss_lever_z,"
+          << "prior_std_pos_vec,prior_std_att_vec,prior_std_ba_vec,prior_std_bg_vec,prior_std_gnss_lever_vec,"
+          << "prior_cov_pos_mat,prior_cov_vel_mat,prior_cov_att_mat,"
+          << "prior_cov_pos_vel_mat,prior_cov_pos_att_mat,prior_cov_vel_att_mat,"
+          << "prior_cov_pos_gnss_lever_mat,prior_cov_att_gnss_lever_mat,"
+          << "prior_cov_ba_pos_mat,prior_cov_ba_att_mat,prior_cov_ba_gnss_lever_mat,"
+          << "prior_cov_bg_pos_mat,prior_cov_bg_att_mat,prior_cov_bg_gnss_lever_mat,"
+          << "prior_cov_gnss_lever_mat,"
+          << "r_mat,"
+          << "s_mat,"
+          << "h_pos_x_vec,h_pos_y_vec,h_pos_z_vec,"
+          << "h_att_x_vec,h_att_y_vec,h_att_z_vec,"
+          << "h_gnss_lever_x_vec,h_gnss_lever_y_vec,h_gnss_lever_z_vec,"
+          << "raw_k_gnss_lever_y_vec,"
+          << "num_gnss_lever_y_vec,"
+          << "num_gnss_lever_y_from_pos_vec,"
+          << "num_gnss_lever_y_from_att_vec,"
+          << "num_gnss_lever_y_from_gnss_lever_vec,"
+          << "num_gnss_lever_y_from_lgx_vec,"
+          << "num_gnss_lever_y_from_lgy_vec,"
+          << "num_gnss_lever_y_from_lgz_vec,"
+          << "k_pos_x_vec,k_pos_y_vec,k_pos_z_vec,"
+          << "k_vel_x_vec,k_vel_y_vec,k_vel_z_vec,"
+          << "k_att_x_vec,k_att_y_vec,k_att_z_vec,"
+          << "k_ba_x_vec,k_ba_y_vec,k_ba_z_vec,"
+          << "k_bg_x_vec,k_bg_y_vec,k_bg_z_vec,"
+          << "k_gnss_lever_x_vec,k_gnss_lever_y_vec,k_gnss_lever_z_vec\n";
+    }
+  }
+
+  if (!options.predict_debug_output_path.empty()) {
+    fs::path predict_debug_path(options.predict_debug_output_path);
+    if (!predict_debug_path.parent_path().empty()) {
+      fs::create_directories(predict_debug_path.parent_path());
+    }
+    impl_->predict_debug_file.open(predict_debug_path, ios::out | ios::trunc);
+    if (impl_->predict_debug_file.is_open()) {
+      impl_->predict_debug_file << fixed << setprecision(9);
+      impl_->predict_debug_file
+          << "step_index,tag,t_prev,t_curr,dt,"
+          << "p_before_common_mat,phi_common_mat,qd_common_mat,"
+          << "phi_p_common_mat,p_after_raw_common_mat,p_after_final_common_mat\n";
     }
   }
 }
@@ -446,9 +707,12 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
 // ---------- Correct ----------
 bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
                                 const VectorXd &y, const MatrixXd &H, const MatrixXd &R,
-                                const StateMask *update_mask) {
+                                const StateMask *update_mask,
+                                const StateGainScale *gain_scale,
+                                const StateMeasurementGainScale *gain_element_scale) {
   if (!impl_->enabled) {
-    return engine.Correct(y, H, R, nullptr, update_mask);
+    return engine.Correct(y, H, R, nullptr, update_mask, gain_scale,
+                          gain_element_scale);
   }
 
   // 捕获修正前状态（用于 NHC 的 dv/dq 额外日志）
@@ -457,7 +721,8 @@ bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
   Vector4d q_before = engine.state().q;
 
   VectorXd dx;
-  bool updated = engine.Correct(y, H, R, &dx, update_mask);
+  bool updated = engine.Correct(y, H, R, &dx, update_mask, gain_scale,
+                                gain_element_scale);
 
   bool log_div = false, log_drift = false;
   if (impl_->config.enable_diagnostics) {
@@ -490,7 +755,7 @@ bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
   }
 
   if (updated && impl_->mechanism_enabled && impl_->mechanism_file.is_open() &&
-      impl_->ShouldLogMechanism(tag)) {
+      impl_->ShouldLogMechanism(tag, t)) {
     bool post_gnss =
         std::isfinite(impl_->gnss_split_t) && t > impl_->gnss_split_t + impl_->gnss_tol;
     if (!impl_->config.mechanism_log_post_gnss_only || post_gnss) {
@@ -500,13 +765,85 @@ bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
         const MatrixXd H_bg = snap.H.block(0, StateIdx::kBg, snap.H.rows(), 3);
         const MatrixXd H_mount =
             snap.H.block(0, StateIdx::kMountRoll, snap.H.rows(), 3);
+        const VectorXd h_att_x = snap.H.col(StateIdx::kAtt + 0);
+        const VectorXd h_att_y = snap.H.col(StateIdx::kAtt + 1);
         const VectorXd h_att_z = snap.H.col(StateIdx::kAtt + 2);
+        const VectorXd h_bg_x = snap.H.col(StateIdx::kBg + 0);
+        const VectorXd h_bg_y = snap.H.col(StateIdx::kBg + 1);
         const VectorXd h_bg_z = snap.H.col(StateIdx::kBg + 2);
+        const VectorXd h_mount_roll = snap.H.col(StateIdx::kMountRoll);
+        const VectorXd h_mount_pitch = snap.H.col(StateIdx::kMountPitch);
         const VectorXd h_mount_yaw = snap.H.col(StateIdx::kMountYaw);
+        const VectorXd k_att_z = SafeGainRow(snap.K, StateIdx::kAtt + 2);
+        const VectorXd k_bg_z = SafeGainRow(snap.K, StateIdx::kBg + 2);
+        const VectorXd k_mount_yaw = SafeGainRow(snap.K, StateIdx::kMountYaw);
+        const VectorXd num_att_z =
+            SafeMeasurementNumerator(snap.P_prior, snap.H, StateIdx::kAtt + 2);
+        const VectorXd num_bg_z =
+            SafeMeasurementNumerator(snap.P_prior, snap.H, StateIdx::kBg + 2);
+        const VectorXd num_mount_yaw =
+            SafeMeasurementNumerator(snap.P_prior, snap.H, StateIdx::kMountYaw);
+        const VectorXd num_bg_z_from_vel = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kVel, 3);
+        const VectorXd num_bg_z_from_att = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kAtt, 3);
+        const VectorXd num_bg_z_from_bg = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kBg, 3);
+        const VectorXd num_bg_z_from_sg = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kSg, 3);
+        const VectorXd num_bg_z_from_mount = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kMountRoll, 3);
+        const VectorXd num_bg_z_from_lever = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kLever, 3);
+        const VectorXd p_row_bg_z_att = SafeCovRowBlock(
+            snap.P_prior, StateIdx::kBg + 2, StateIdx::kAtt, 3);
+        const VectorXd p_row_bg_z_bg = SafeCovRowBlock(
+            snap.P_prior, StateIdx::kBg + 2, StateIdx::kBg, 3);
+        const VectorXd p_row_bg_z_mount = SafeCovRowBlock(
+            snap.P_prior, StateIdx::kBg + 2, StateIdx::kMountRoll, 3);
+        const VectorXd num_bg_z_from_att_x = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kAtt + 0, 1);
+        const VectorXd num_bg_z_from_att_y = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kAtt + 1, 1);
+        const VectorXd num_bg_z_from_att_z = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kAtt + 2, 1);
+        const VectorXd num_bg_z_from_bg_x = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kBg + 0, 1);
+        const VectorXd num_bg_z_from_bg_y = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kBg + 1, 1);
+        const VectorXd num_bg_z_from_bg_z = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kBg + 2, 1);
+        const VectorXd num_bg_z_from_mount_roll = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kMountRoll, 1);
+        const VectorXd num_bg_z_from_mount_pitch = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kMountPitch, 1);
+        const VectorXd num_bg_z_from_mount_yaw = SafeStateBlockNumerator(
+            snap.P_prior, snap.H, StateIdx::kBg + 2, StateIdx::kMountYaw, 1);
         MatrixXd H_heading(snap.H.rows(), 3);
         H_heading.col(0) = h_att_z;
         H_heading.col(1) = h_bg_z;
         H_heading.col(2) = h_mount_yaw;
+        const auto &post_cov = engine.cov();
+        const double prior_cov_att_bg =
+            SafeCovValue(snap.P_prior, StateIdx::kAtt + 2, StateIdx::kBg + 2);
+        const double prior_cov_mount_bg =
+            SafeCovValue(snap.P_prior, StateIdx::kMountYaw, StateIdx::kBg + 2);
+        const double post_cov_att_bg =
+            SafeCovValue(post_cov, StateIdx::kAtt + 2, StateIdx::kBg + 2);
+        const double post_cov_mount_bg =
+            SafeCovValue(post_cov, StateIdx::kMountYaw, StateIdx::kBg + 2);
+        const double delta_cov_att_bg_left = SafeCovarianceDeltaLeft(
+            snap.P_prior, snap.H, snap.K, StateIdx::kAtt + 2, StateIdx::kBg + 2);
+        const double delta_cov_att_bg_right = SafeCovarianceDeltaRight(
+            snap.P_prior, snap.H, snap.K, StateIdx::kAtt + 2, StateIdx::kBg + 2);
+        const double delta_cov_att_bg_gain = SafeCovarianceDeltaGain(
+            snap.S, snap.K, StateIdx::kAtt + 2, StateIdx::kBg + 2);
+        const double delta_cov_mount_bg_left = SafeCovarianceDeltaLeft(
+            snap.P_prior, snap.H, snap.K, StateIdx::kMountYaw, StateIdx::kBg + 2);
+        const double delta_cov_mount_bg_right = SafeCovarianceDeltaRight(
+            snap.P_prior, snap.H, snap.K, StateIdx::kMountYaw, StateIdx::kBg + 2);
+        const double delta_cov_mount_bg_gain = SafeCovarianceDeltaGain(
+            snap.S, snap.K, StateIdx::kMountYaw, StateIdx::kBg + 2);
         impl_->mechanism_file
             << tag << "," << t << "," << snap.t_state << ","
             << (post_gnss ? 1 : 0) << ","
@@ -520,6 +857,9 @@ bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
             << snap.K.row(StateIdx::kAtt + 2).norm() << ","
             << snap.K.row(StateIdx::kBg + 2).norm() << ","
             << snap.K.row(StateIdx::kMountYaw).norm() << ","
+            << VectorToCsvField(k_att_z) << ","
+            << VectorToCsvField(k_bg_z) << ","
+            << VectorToCsvField(k_mount_yaw) << ","
             << h_att_z.norm() << ","
             << h_bg_z.norm() << ","
             << h_mount_yaw.norm() << ","
@@ -530,13 +870,353 @@ bool DiagnosticsEngine::Correct(EskfEngine &engine, const string &tag, double t,
             << SafeQuadraticInfo(snap.R, h_bg_z) << ","
             << SafeQuadraticInfo(snap.R, h_mount_yaw) << ","
             << SafeTraceInfo(snap.R, H_heading) << ","
+            << VectorToCsvField(num_att_z) << ","
+            << VectorToCsvField(num_bg_z) << ","
+            << VectorToCsvField(num_mount_yaw) << ","
+            << VectorToCsvField(num_bg_z_from_vel) << ","
+            << VectorToCsvField(num_bg_z_from_att) << ","
+            << VectorToCsvField(num_bg_z_from_bg) << ","
+            << VectorToCsvField(num_bg_z_from_sg) << ","
+            << VectorToCsvField(num_bg_z_from_mount) << ","
+            << VectorToCsvField(num_bg_z_from_lever) << ","
+            << VectorToCsvField(p_row_bg_z_att) << ","
+            << VectorToCsvField(p_row_bg_z_bg) << ","
+            << VectorToCsvField(p_row_bg_z_mount) << ","
+            << VectorToCsvField(h_att_x) << ","
+            << VectorToCsvField(h_att_y) << ","
+            << VectorToCsvField(h_att_z) << ","
+            << VectorToCsvField(h_bg_x) << ","
+            << VectorToCsvField(h_bg_y) << ","
+            << VectorToCsvField(h_bg_z) << ","
+            << VectorToCsvField(h_mount_roll) << ","
+            << VectorToCsvField(h_mount_pitch) << ","
+            << VectorToCsvField(h_mount_yaw) << ","
+            << VectorToCsvField(num_bg_z_from_att_x) << ","
+            << VectorToCsvField(num_bg_z_from_att_y) << ","
+            << VectorToCsvField(num_bg_z_from_att_z) << ","
+            << VectorToCsvField(num_bg_z_from_bg_x) << ","
+            << VectorToCsvField(num_bg_z_from_bg_y) << ","
+            << VectorToCsvField(num_bg_z_from_bg_z) << ","
+            << VectorToCsvField(num_bg_z_from_mount_roll) << ","
+            << VectorToCsvField(num_bg_z_from_mount_pitch) << ","
+            << VectorToCsvField(num_bg_z_from_mount_yaw) << ","
+            << prior_cov_att_bg << ","
+            << SafeCorrValue(snap.P_prior, StateIdx::kAtt + 2, StateIdx::kBg + 2)
+            << ","
+            << prior_cov_mount_bg << ","
+            << SafeCorrValue(snap.P_prior, StateIdx::kMountYaw, StateIdx::kBg + 2)
+            << ","
+            << delta_cov_att_bg_left << ","
+            << delta_cov_att_bg_right << ","
+            << delta_cov_att_bg_gain << ","
+            << (post_cov_att_bg - prior_cov_att_bg) << ","
+            << delta_cov_mount_bg_left << ","
+            << delta_cov_mount_bg_right << ","
+            << delta_cov_mount_bg_gain << ","
+            << (post_cov_mount_bg - prior_cov_mount_bg) << ","
+            << post_cov_att_bg << ","
+            << SafeCorrValue(post_cov, StateIdx::kAtt + 2, StateIdx::kBg + 2)
+            << ","
+            << post_cov_mount_bg << ","
+            << SafeCorrValue(post_cov, StateIdx::kMountYaw, StateIdx::kBg + 2)
+            << ","
             << state_before.bg.z() << "," << engine.state().bg.z() << ","
             << state_before.mounting_yaw << "," << engine.state().mounting_yaw
             << "\n";
       }
     }
   }
+
+  if (updated && !impl_->first_gnss_pos_recorded &&
+      impl_->first_update_file.is_open() && TagMatches(tag, "GNSS_POS")) {
+    const auto &snap = engine.last_correction_debug();
+    if (snap.valid && snap.H.cols() == kStateDim && snap.K.rows() == kStateDim) {
+      static const char *kAxes[3] = {"x", "y", "z"};
+      for (int axis = 0; axis < 3; ++axis) {
+        VectorXd h_col = snap.H.col(StateIdx::kGnssLever + axis);
+        VectorXd k_row = snap.K.row(StateIdx::kGnssLever + axis).transpose();
+        double lever_before = state_before.gnss_lever_arm(axis);
+        double lever_after = engine.state().gnss_lever_arm(axis);
+        impl_->first_update_file
+            << tag << "," << kAxes[axis] << "," << t << ","
+            << snap.t_state << "," << (snap.used_true_iekf ? 1 : 0) << ","
+            << lever_before << "," << lever_after << ","
+            << snap.dx(StateIdx::kGnssLever + axis) << ","
+            << VectorToCsvField(state_before.p) << ","
+            << VectorToCsvField(state_before.v) << ","
+            << VectorToCsvField(state_before.q) << ","
+            << VectorToCsvField(engine.state().p) << ","
+            << VectorToCsvField(snap.y) << ","
+            << VectorToCsvField(h_col) << ","
+            << VectorToCsvField(k_row) << "\n";
+      }
+      impl_->first_gnss_pos_recorded = true;
+    }
+  }
+
+  if (updated && impl_->gnss_update_file.is_open() &&
+      (TagMatches(tag, "GNSS_POS") || TagMatches(tag, "GNSS_VEL"))) {
+    const auto &snap = engine.last_correction_debug();
+    if (snap.valid) {
+      const auto innovation_at = [&snap](int idx) -> double {
+        return (idx >= 0 && idx < snap.y.size())
+                   ? snap.y(idx)
+                   : numeric_limits<double>::quiet_NaN();
+      };
+      const auto safe_h_col = [&snap](int idx) -> VectorXd {
+        if (idx >= 0 && idx < snap.H.cols()) {
+          return snap.H.col(idx);
+        }
+        return VectorXd::Constant(snap.H.rows(),
+                                  numeric_limits<double>::quiet_NaN());
+      };
+      const auto safe_k_row = [&snap](int idx) -> VectorXd {
+        if (idx >= 0 && idx < snap.K.rows()) {
+          return snap.K.row(idx).transpose();
+        }
+        return VectorXd::Constant(snap.K.cols(),
+                                  numeric_limits<double>::quiet_NaN());
+      };
+      const auto safe_state_block_numerator =
+          [&snap](int row_idx, int block_start, int block_dim) -> VectorXd {
+        if (row_idx < 0 || row_idx >= snap.P_prior.rows() || block_dim <= 0 ||
+            block_start < 0 ||
+            block_start + block_dim > snap.P_prior.cols() ||
+            snap.H.cols() != snap.P_prior.cols()) {
+          return VectorXd::Constant(
+              snap.H.rows(), numeric_limits<double>::quiet_NaN());
+        }
+        Eigen::RowVectorXd p_row =
+            snap.P_prior.block(row_idx, block_start, 1, block_dim);
+        MatrixXd h_block = snap.H.block(0, block_start, snap.H.rows(), block_dim);
+        return (p_row * h_block.transpose()).transpose();
+      };
+      Vector3d prior_std_pos = Vector3d::Constant(numeric_limits<double>::quiet_NaN());
+      Vector3d prior_std_att = Vector3d::Constant(numeric_limits<double>::quiet_NaN());
+      Vector3d prior_std_ba = Vector3d::Constant(numeric_limits<double>::quiet_NaN());
+      Vector3d prior_std_bg = Vector3d::Constant(numeric_limits<double>::quiet_NaN());
+      Vector3d prior_std_gnss_lever =
+          Vector3d::Constant(numeric_limits<double>::quiet_NaN());
+      if (snap.P_prior.allFinite()) {
+        for (int axis = 0; axis < 3; ++axis) {
+          prior_std_pos(axis) =
+              sqrt(max(0.0, snap.P_prior(StateIdx::kPos + axis,
+                                         StateIdx::kPos + axis)));
+          prior_std_att(axis) =
+              sqrt(max(0.0, snap.P_prior(StateIdx::kAtt + axis,
+                                         StateIdx::kAtt + axis)));
+          prior_std_ba(axis) =
+              sqrt(max(0.0, snap.P_prior(StateIdx::kBa + axis,
+                                         StateIdx::kBa + axis)));
+          prior_std_bg(axis) =
+              sqrt(max(0.0, snap.P_prior(StateIdx::kBg + axis,
+                                         StateIdx::kBg + axis)));
+          prior_std_gnss_lever(axis) =
+              sqrt(max(0.0, snap.P_prior(StateIdx::kGnssLever + axis,
+                                         StateIdx::kGnssLever + axis)));
+        }
+      }
+      MatrixXd prior_cov_pos_att =
+          snap.P_prior.block<3, 3>(StateIdx::kPos, StateIdx::kAtt);
+      MatrixXd prior_cov_pos =
+          snap.P_prior.block<3, 3>(StateIdx::kPos, StateIdx::kPos);
+      MatrixXd prior_cov_vel =
+          snap.P_prior.block<3, 3>(StateIdx::kVel, StateIdx::kVel);
+      MatrixXd prior_cov_att =
+          snap.P_prior.block<3, 3>(StateIdx::kAtt, StateIdx::kAtt);
+      MatrixXd prior_cov_pos_vel =
+          snap.P_prior.block<3, 3>(StateIdx::kPos, StateIdx::kVel);
+      MatrixXd prior_cov_vel_att =
+          snap.P_prior.block<3, 3>(StateIdx::kVel, StateIdx::kAtt);
+      MatrixXd prior_cov_ba_pos =
+          snap.P_prior.block<3, 3>(StateIdx::kBa, StateIdx::kPos);
+      MatrixXd prior_cov_ba_att =
+          snap.P_prior.block<3, 3>(StateIdx::kBa, StateIdx::kAtt);
+      MatrixXd prior_cov_bg_pos =
+          snap.P_prior.block<3, 3>(StateIdx::kBg, StateIdx::kPos);
+      MatrixXd prior_cov_bg_att =
+          snap.P_prior.block<3, 3>(StateIdx::kBg, StateIdx::kAtt);
+      MatrixXd prior_cov_pos_gnss_lever =
+          snap.P_prior.block<3, 3>(StateIdx::kPos, StateIdx::kGnssLever);
+      MatrixXd prior_cov_att_gnss_lever =
+          snap.P_prior.block<3, 3>(StateIdx::kAtt, StateIdx::kGnssLever);
+      MatrixXd prior_cov_ba_gnss_lever =
+          snap.P_prior.block<3, 3>(StateIdx::kBa, StateIdx::kGnssLever);
+      MatrixXd prior_cov_bg_gnss_lever =
+          snap.P_prior.block<3, 3>(StateIdx::kBg, StateIdx::kGnssLever);
+      MatrixXd prior_cov_gnss_lever =
+          snap.P_prior.block<3, 3>(StateIdx::kGnssLever, StateIdx::kGnssLever);
+      VectorXd raw_k_gnss_lever_y =
+          VectorXd::Constant(snap.K.cols(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_pos =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_att =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_gnss_lever =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_lgx =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_lgy =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      VectorXd num_gnss_lever_y_from_lgz =
+          VectorXd::Constant(snap.H.rows(), numeric_limits<double>::quiet_NaN());
+      if (snap.H.rows() == snap.S.rows() && snap.S.rows() == snap.S.cols() &&
+          snap.H.cols() == snap.P_prior.cols()) {
+        VectorXd num_total = safe_state_block_numerator(StateIdx::kGnssLever + 1, 0,
+                                                        kStateDim);
+        if (num_total.size() == snap.S.rows() && snap.S.allFinite()) {
+          Eigen::LDLT<MatrixXd> ldlt(snap.S);
+          if (ldlt.info() == Eigen::Success) {
+            raw_k_gnss_lever_y = ldlt.solve(num_total);
+          }
+        }
+        num_gnss_lever_y = num_total;
+        num_gnss_lever_y_from_pos =
+            safe_state_block_numerator(StateIdx::kGnssLever + 1, StateIdx::kPos, 3);
+        num_gnss_lever_y_from_att =
+            safe_state_block_numerator(StateIdx::kGnssLever + 1, StateIdx::kAtt, 3);
+        num_gnss_lever_y_from_gnss_lever = safe_state_block_numerator(
+            StateIdx::kGnssLever + 1, StateIdx::kGnssLever, 3);
+        num_gnss_lever_y_from_lgx = safe_state_block_numerator(
+            StateIdx::kGnssLever + 1, StateIdx::kGnssLever + 0, 1);
+        num_gnss_lever_y_from_lgy = safe_state_block_numerator(
+            StateIdx::kGnssLever + 1, StateIdx::kGnssLever + 1, 1);
+        num_gnss_lever_y_from_lgz = safe_state_block_numerator(
+            StateIdx::kGnssLever + 1, StateIdx::kGnssLever + 2, 1);
+      }
+      impl_->gnss_update_file
+          << tag << "," << t << "," << snap.t_state << ","
+          << (snap.used_true_iekf ? 1 : 0) << ","
+          << innovation_at(0) << "," << innovation_at(1) << ","
+          << innovation_at(2) << "," << snap.y.norm() << ","
+          << state_before.p.x() << "," << state_before.p.y() << ","
+          << state_before.p.z() << ","
+          << state_before.q(0) << "," << state_before.q(1) << ","
+          << state_before.q(2) << "," << state_before.q(3) << ","
+          << state_before.v.x() << "," << state_before.v.y() << ","
+          << state_before.v.z() << ","
+          << engine.state().p.x() << "," << engine.state().p.y() << ","
+          << engine.state().p.z() << ","
+          << engine.state().v.x() << "," << engine.state().v.y() << ","
+          << engine.state().v.z() << ","
+          << engine.state().q(0) << "," << engine.state().q(1) << ","
+          << engine.state().q(2) << "," << engine.state().q(3) << ","
+          << state_before.gnss_lever_arm.x() << ","
+          << state_before.gnss_lever_arm.y() << ","
+          << state_before.gnss_lever_arm.z() << ","
+          << snap.dx(StateIdx::kPos + 0) << ","
+          << snap.dx(StateIdx::kPos + 1) << ","
+          << snap.dx(StateIdx::kPos + 2) << ","
+          << snap.dx(StateIdx::kVel + 0) << ","
+          << snap.dx(StateIdx::kVel + 1) << ","
+          << snap.dx(StateIdx::kVel + 2) << ","
+          << snap.dx(StateIdx::kAtt + 0) << ","
+          << snap.dx(StateIdx::kAtt + 1) << ","
+          << snap.dx(StateIdx::kAtt + 2) << ","
+          << snap.dx(StateIdx::kBa + 0) << ","
+          << snap.dx(StateIdx::kBa + 1) << ","
+          << snap.dx(StateIdx::kBa + 2) << ","
+          << snap.dx(StateIdx::kBg + 0) << ","
+          << snap.dx(StateIdx::kBg + 1) << ","
+          << snap.dx(StateIdx::kBg + 2) << ","
+          << snap.dx(StateIdx::kSg + 0) << ","
+          << snap.dx(StateIdx::kSg + 1) << ","
+          << snap.dx(StateIdx::kSg + 2) << ","
+          << snap.dx(StateIdx::kSa + 0) << ","
+          << snap.dx(StateIdx::kSa + 1) << ","
+          << snap.dx(StateIdx::kSa + 2) << ","
+          << snap.dx(StateIdx::kGnssLever + 0) << ","
+          << snap.dx(StateIdx::kGnssLever + 1) << ","
+          << snap.dx(StateIdx::kGnssLever + 2) << ","
+          << VectorToCsvField(prior_std_pos) << ","
+          << VectorToCsvField(prior_std_att) << ","
+          << VectorToCsvField(prior_std_ba) << ","
+          << VectorToCsvField(prior_std_bg) << ","
+          << VectorToCsvField(prior_std_gnss_lever) << ","
+          << MatrixToCsvField(prior_cov_pos) << ","
+          << MatrixToCsvField(prior_cov_vel) << ","
+          << MatrixToCsvField(prior_cov_att) << ","
+          << MatrixToCsvField(prior_cov_pos_vel) << ","
+          << MatrixToCsvField(prior_cov_pos_att) << ","
+          << MatrixToCsvField(prior_cov_vel_att) << ","
+          << MatrixToCsvField(prior_cov_pos_gnss_lever) << ","
+          << MatrixToCsvField(prior_cov_att_gnss_lever) << ","
+          << MatrixToCsvField(prior_cov_ba_pos) << ","
+          << MatrixToCsvField(prior_cov_ba_att) << ","
+          << MatrixToCsvField(prior_cov_ba_gnss_lever) << ","
+          << MatrixToCsvField(prior_cov_bg_pos) << ","
+          << MatrixToCsvField(prior_cov_bg_att) << ","
+          << MatrixToCsvField(prior_cov_bg_gnss_lever) << ","
+          << MatrixToCsvField(prior_cov_gnss_lever) << ","
+          << MatrixToCsvField(snap.R) << ","
+          << MatrixToCsvField(snap.S) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kPos + 0)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kPos + 1)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kPos + 2)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kAtt + 0)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kAtt + 1)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kAtt + 2)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kGnssLever + 0)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kGnssLever + 1)) << ","
+          << VectorToCsvField(safe_h_col(StateIdx::kGnssLever + 2)) << ","
+          << VectorToCsvField(raw_k_gnss_lever_y) << ","
+          << VectorToCsvField(num_gnss_lever_y) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_pos) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_att) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_gnss_lever) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_lgx) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_lgy) << ","
+          << VectorToCsvField(num_gnss_lever_y_from_lgz) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kPos + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kPos + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kPos + 2)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kVel + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kVel + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kVel + 2)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kAtt + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kAtt + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kAtt + 2)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBa + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBa + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBa + 2)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBg + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBg + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kBg + 2)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kGnssLever + 0)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kGnssLever + 1)) << ","
+          << VectorToCsvField(safe_k_row(StateIdx::kGnssLever + 2)) << "\n";
+    }
+  }
   return updated;
+}
+
+void DiagnosticsEngine::LogPredict(const string &tag, const EskfEngine &engine) {
+  if (!impl_->enabled || !impl_->predict_debug_file.is_open()) {
+    return;
+  }
+  const auto &snap = engine.last_predict_debug();
+  if (!snap.valid) {
+    return;
+  }
+  const double tol = impl_->gnss_tol;
+  if (snap.t_prev + tol < impl_->predict_debug_start_t ||
+      snap.t_prev >= impl_->predict_debug_end_t - tol) {
+    return;
+  }
+  impl_->predict_debug_file
+      << impl_->predict_debug_count++ << ","
+      << tag << ","
+      << snap.t_prev << ","
+      << snap.t_curr << ","
+      << snap.dt << ","
+      << MatrixToCsvField(snap.P_before_common) << ","
+      << MatrixToCsvField(snap.Phi_common) << ","
+      << MatrixToCsvField(snap.Qd_common) << ","
+      << MatrixToCsvField(snap.PhiP_common) << ","
+      << MatrixToCsvField(snap.P_after_raw_common) << ","
+      << MatrixToCsvField(snap.P_after_final_common) << "\n";
 }
 
 // ---------- CheckGravityAlignment ----------

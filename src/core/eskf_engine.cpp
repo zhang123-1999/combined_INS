@@ -9,6 +9,23 @@
 using namespace std;
 using namespace Eigen;
 
+namespace {
+
+void ApplyMarkovNominalPropagation(State &state, double dt, const NoiseParams &noise) {
+  (void)state;
+  (void)dt;
+  (void)noise;
+  // Align with KF-GINS: nominal ba/bg/sg/sa remain piecewise constant
+  // between measurement-feedback steps. The GM model is kept only in F/Q.
+}
+
+Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> ExtractPredictCommonBlock(
+    const Matrix<double, kStateDim, kStateDim> &mat) {
+  return mat.block<kPredictDebugCommonDim, kPredictDebugCommonDim>(0, 0);
+}
+
+}  // namespace
+
 /**
  * 构造 ESKF 引擎并保存噪声参数。
  * @param noise 过程与量测噪声配置
@@ -32,6 +49,13 @@ void EskfEngine::Initialize(const State &state,
   }
   ApplyStateMaskToCov();
   initialized_ = true;
+}
+
+void EskfEngine::OverrideStateAndCov(
+    const State &state, const Matrix<double, kStateDim, kStateDim> &P) {
+  state_ = state;
+  P_ = 0.5 * (P + P.transpose());
+  ApplyStateMaskToCov();
 }
 
 /**
@@ -64,6 +88,22 @@ bool EskfEngine::Predict() {
   if (!initialized_ || imu_state_ != ImuCacheState::Ready) {
     return false;
   }
+  return PredictWithImuPair(prev_imu_, curr_imu_);
+}
+
+bool EskfEngine::PredictWithImuPair(const ImuData &imu_prev,
+                                    const ImuData &imu_curr) {
+  last_predict_debug_.valid = false;
+  if (!initialized_) {
+    return false;
+  }
+
+  prev_imu_ = imu_prev;
+  curr_imu_ = imu_curr;
+  if (curr_imu_.dt <= 0.0) {
+    curr_imu_.dt = curr_imu_.t - prev_imu_.t;
+  }
+  imu_state_ = ImuCacheState::Ready;
   if (curr_imu_.dt <= 1e-9) {
     // 异常 dt 不参与传播
     return false;
@@ -79,24 +119,45 @@ bool EskfEngine::Predict() {
 
   // 惯导传播 + 过程噪声离散化（NED系下的完整误差模型）
   Matrix<double, kStateDim, kStateDim> Phi, Qd;
+  const Matrix<double, kStateDim, kStateDim> P_before = P_;
 
   // 过程模型中的 ω_ib^b 需要使用“零偏/比例因子修正后的陀螺角速度”
   Vector3d omega_ib_b_corr = Vector3d::Zero();
+  Vector3d omega_ib_b_unbiased = Vector3d::Zero();
+  Vector3d f_b_unbiased = Vector3d::Zero();
+  Vector3d sf_g = Vector3d::Ones();
+  Vector3d sf_a = Vector3d::Ones();
   if (curr_imu_.dt > 1e-9) {
     Vector3d omega_ib_b_raw = curr_imu_.dtheta / curr_imu_.dt;
-    Vector3d omega_ib_unbiased = omega_ib_b_raw - state_.bg;
-    Vector3d sf_g = Vector3d::Ones() - state_.sg;
-    omega_ib_b_corr = sf_g.cwiseProduct(omega_ib_unbiased);
+    omega_ib_b_unbiased = omega_ib_b_raw - state_.bg;
+    f_b_unbiased = curr_imu_.dvel / curr_imu_.dt - state_.ba;
+    sf_g = (Vector3d::Ones() + state_.sg).cwiseInverse();
+    sf_a = (Vector3d::Ones() + state_.sa).cwiseInverse();
+    omega_ib_b_corr = sf_g.cwiseProduct(omega_ib_b_unbiased);
   }
   InsMech::BuildProcessModel(R_ne.transpose() * res.Cbn,  // C_b^n = R_e^n * C_b^e
-                             res.f_b, omega_ib_b_corr, v_ned,
+                             res.f_b, omega_ib_b_corr,
+                             f_b_unbiased, omega_ib_b_unbiased,
+                             sf_a, sf_g, v_ned,
                              llh.lat, llh.h, curr_imu_.dt, noise_, Phi, Qd,
                              fej_);
   state_ = res.state;
-  P_ = Phi * P_ * Phi.transpose() + Qd;
-  P_ = 0.5 * (P_ + P_.transpose());
+  ApplyMarkovNominalPropagation(state_, curr_imu_.dt, noise_);
+  const Matrix<double, kStateDim, kStateDim> PhiP = Phi * P_before * Phi.transpose();
+  const Matrix<double, kStateDim, kStateDim> P_after_raw = PhiP + Qd;
+  P_ = 0.5 * (P_after_raw + P_after_raw.transpose());
   ApplyStateMaskToCov();
   ApplyCovarianceFloor();
+  last_predict_debug_.valid = true;
+  last_predict_debug_.t_prev = imu_prev.t;
+  last_predict_debug_.t_curr = curr_imu_.t;
+  last_predict_debug_.dt = curr_imu_.dt;
+  last_predict_debug_.P_before_common = ExtractPredictCommonBlock(P_before);
+  last_predict_debug_.Phi_common = ExtractPredictCommonBlock(Phi);
+  last_predict_debug_.Qd_common = ExtractPredictCommonBlock(Qd);
+  last_predict_debug_.PhiP_common = ExtractPredictCommonBlock(PhiP);
+  last_predict_debug_.P_after_raw_common = ExtractPredictCommonBlock(P_after_raw);
+  last_predict_debug_.P_after_final_common = ExtractPredictCommonBlock(P_);
   return true;
 }
 
@@ -109,7 +170,9 @@ bool EskfEngine::Predict() {
  */
 bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
                          const MatrixXd &R, VectorXd *dx_out,
-                         const StateMask *update_mask) {
+                         const StateMask *update_mask,
+                         const StateGainScale *gain_scale,
+                         const StateMeasurementGainScale *gain_element_scale) {
   last_true_iekf_correction_.valid = false;
   last_correction_debug_.valid = false;
   if (!initialized_ || y.size() == 0) {
@@ -125,6 +188,8 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
   MatrixXd S = H * P_ * H.transpose() + R;
   MatrixXd K = ComputeKalmanGain(H, R);
   ApplyUpdateMaskToKalmanGain(K, update_mask);
+  ApplyGainScaleToKalmanGain(K, gain_scale);
+  ApplyElementGainScaleToKalmanGain(K, gain_element_scale);
   if (K.rows() != kStateDim || K.cols() != y.size() || !K.allFinite()) {
     return false;
   }
@@ -165,7 +230,7 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
     last_true_iekf_correction_.P_tilde = P_;
     last_true_iekf_correction_.dx = dx;
     last_true_iekf_correction_.covariance_floor_applied = false;
-    InjectErrorState(dx);
+    InjectErrorState(dx, update_mask);
     ApplyTrueInEkfReset(dx);
     last_true_iekf_correction_.P_after_reset = P_;
     if (fej_ != nullptr && fej_->apply_covariance_floor_after_reset) {
@@ -179,10 +244,10 @@ bool EskfEngine::Correct(const VectorXd &y, const MatrixXd &H,
         (fej_ != nullptr && fej_->debug_enable_standard_reset_gamma);
     if (apply_standard_reset) {
       UpdateCovarianceJoseph(K, H, R);
-      InjectErrorState(dx);
+      InjectErrorState(dx, update_mask);
       ApplyStandardEskfReset(dx);
     } else {
-      InjectErrorState(dx);
+      InjectErrorState(dx, update_mask);
       UpdateCovarianceJoseph(K, H, R);
     }
   }
@@ -227,7 +292,8 @@ MatrixXd EskfEngine::ComputeKalmanGain(const MatrixXd &H,
  *
  * @param dx 误差状态增量 [δr^n, δv^n, φ, dba, dbg, dsg, dsa, ...]
  */
-void EskfEngine::InjectErrorState(const VectorXd &dx) {
+void EskfEngine::InjectErrorState(const VectorXd &dx,
+                                  const StateMask *update_mask) {
   Vector3d dr_ned = dx.segment<3>(StateIdx::kPos);  // NED位置误差
   Vector3d dv_ned = dx.segment<3>(StateIdx::kVel);  // NED速度误差
   Vector3d dphi_ned = dx.segment<3>(StateIdx::kAtt);  // 姿态误差（NED系）
@@ -333,20 +399,41 @@ void EskfEngine::InjectErrorState(const VectorXd &dx) {
   state_.gnss_lever_arm += dgnss_lever;
 
   if (correction_guard_.enabled) {
-    state_.odo_scale = std::clamp(state_.odo_scale, correction_guard_.odo_scale_min,
-                                  correction_guard_.odo_scale_max);
-    state_.mounting_roll =
-        std::clamp(state_.mounting_roll, -correction_guard_.max_mounting_roll,
-                   correction_guard_.max_mounting_roll);
-    state_.mounting_pitch =
-        std::clamp(state_.mounting_pitch, -correction_guard_.max_mounting_pitch,
-                   correction_guard_.max_mounting_pitch);
-    state_.mounting_yaw =
-        std::clamp(state_.mounting_yaw, -correction_guard_.max_mounting_yaw,
-                   correction_guard_.max_mounting_yaw);
+    if (IsStateEnabledByMasks(StateIdx::kOdoScale, update_mask) &&
+        std::abs(dscale) > 0.0) {
+      state_.odo_scale =
+          std::clamp(state_.odo_scale, correction_guard_.odo_scale_min,
+                     correction_guard_.odo_scale_max);
+    }
+    if (IsStateEnabledByMasks(StateIdx::kMountRoll, update_mask) &&
+        std::abs(d_mounting_roll) > 0.0) {
+      state_.mounting_roll =
+          std::clamp(state_.mounting_roll, -correction_guard_.max_mounting_roll,
+                     correction_guard_.max_mounting_roll);
+    }
+    if (IsStateEnabledByMasks(StateIdx::kMountPitch, update_mask) &&
+        std::abs(d_mounting_pitch) > 0.0) {
+      state_.mounting_pitch =
+          std::clamp(state_.mounting_pitch, -correction_guard_.max_mounting_pitch,
+                     correction_guard_.max_mounting_pitch);
+    }
+    if (IsStateEnabledByMasks(StateIdx::kMountYaw, update_mask) &&
+        std::abs(d_mounting_yaw) > 0.0) {
+      state_.mounting_yaw =
+          std::clamp(state_.mounting_yaw, -correction_guard_.max_mounting_yaw,
+                     correction_guard_.max_mounting_yaw);
+    }
 
+    bool lever_enabled = false;
+    for (int axis = 0; axis < 3; ++axis) {
+      lever_enabled =
+          lever_enabled || IsStateEnabledByMasks(StateIdx::kLever + axis, update_mask);
+    }
     double lever_norm = state_.lever_arm.norm();
-    if (lever_norm > correction_guard_.max_lever_arm_norm && lever_norm > 1e-12) {
+    if (lever_enabled &&
+        dlever.norm() > 0.0 &&
+        lever_norm > correction_guard_.max_lever_arm_norm &&
+        lever_norm > 1e-12) {
       state_.lever_arm *= (correction_guard_.max_lever_arm_norm / lever_norm);
     }
   }
@@ -442,6 +529,41 @@ void EskfEngine::ApplyUpdateMaskToKalmanGain(MatrixXd &K,
   }
 }
 
+void EskfEngine::ApplyGainScaleToKalmanGain(MatrixXd &K,
+                                            const StateGainScale *gain_scale) const {
+  if (gain_scale == nullptr || K.rows() != kStateDim) {
+    return;
+  }
+  for (int i = 0; i < kStateDim; ++i) {
+    double scale = (*gain_scale)[i];
+    if (!std::isfinite(scale)) {
+      scale = 1.0;
+    }
+    K.row(i) *= scale;
+  }
+}
+
+void EskfEngine::ApplyElementGainScaleToKalmanGain(
+    MatrixXd &K,
+    const StateMeasurementGainScale *gain_element_scale) const {
+  if (gain_element_scale == nullptr) {
+    return;
+  }
+  if (gain_element_scale->rows() != K.rows() ||
+      gain_element_scale->cols() != K.cols()) {
+    return;
+  }
+  for (int i = 0; i < K.rows(); ++i) {
+    for (int j = 0; j < K.cols(); ++j) {
+      double scale = (*gain_element_scale)(i, j);
+      if (!std::isfinite(scale)) {
+        scale = 1.0;
+      }
+      K(i, j) *= scale;
+    }
+  }
+}
+
 void EskfEngine::ApplyStateMaskToCov() {
   for (int i = 0; i < kStateDim; ++i) {
     if (!state_mask_[i]) {
@@ -468,14 +590,18 @@ void EskfEngine::ApplyCovarianceFloor() {
   const double pos_floor = std::max(0.0, covariance_floor_.pos_var);
   const double vel_floor = std::max(0.0, covariance_floor_.vel_var);
   const double att_floor = std::max(0.0, covariance_floor_.att_var);
+  const double odo_scale_floor = std::max(0.0, covariance_floor_.odo_scale_var);
+  const Vector3d lever_floor = covariance_floor_.lever_var.cwiseMax(0.0);
   const double mounting_floor = std::max(0.0, covariance_floor_.mounting_var);
   const double bg_floor = std::max(0.0, covariance_floor_.bg_var);
 
+  apply_floor(StateIdx::kOdoScale, odo_scale_floor);  // odo scale
   for (int i = 0; i < 3; ++i) {
     apply_floor(StateIdx::kPos + i, pos_floor);        // position
     apply_floor(StateIdx::kVel + i, vel_floor);        // velocity
     apply_floor(StateIdx::kAtt + i, att_floor);        // attitude
     apply_floor(StateIdx::kBg + i, bg_floor);          // gyro bias
+    apply_floor(StateIdx::kLever + i, lever_floor(i)); // odo lever arm
     apply_floor(StateIdx::kMountRoll + i, mounting_floor);  // mounting
   }
 

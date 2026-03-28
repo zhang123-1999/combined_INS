@@ -42,7 +42,12 @@ class DiagnosticsEngine {
   bool Correct(EskfEngine &engine, const std::string &tag, double t,
                const Eigen::VectorXd &y, const Eigen::MatrixXd &H,
                const Eigen::MatrixXd &R,
-               const StateMask *update_mask = nullptr);
+               const StateMask *update_mask = nullptr,
+               const StateGainScale *gain_scale = nullptr,
+               const StateMeasurementGainScale *gain_element_scale = nullptr);
+
+  /** 记录一次 predict 调试快照（若配置了 predict_debug_output_path）。 */
+  void LogPredict(const std::string &tag, const EskfEngine &engine);
 
   /** 重力对准静止窗口诊断（在 ZUPT 更新之后、NHC 更新之前调用） */
   void CheckGravityAlignment(double t, double dt, const ImuData &imu,

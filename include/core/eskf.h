@@ -72,16 +72,19 @@ using FejManager = InEkfConfig;
 
 /**
  * 过程与量测噪声参数。
- * sigma_acc/gyro/ba/bg 为连续时间噪声密度，sigma_uwb 为 UWB 量测标准差。
+ * sigma_acc/gyro 始终表示连续时间白噪声密度；
+ * sigma_ba/bg/sg/sa 在 markov_corr_time > 0 时表示一阶 GM 稳态标准差，
+ * 在 markov_corr_time <= 0 时才退化为随机游走驱动噪声密度。
+ * sigma_uwb 为 UWB 量测标准差。
  */
 struct NoiseParams {
   // 连续时间随机游走/白噪声密度
   double sigma_acc = 0.0;    // m/s^2/√Hz
   double sigma_gyro = 0.0;  // rad/s/√Hz
-  double sigma_ba = 0.0;   // m/s^2/√Hz
-  double sigma_bg = 0.0;   // rad/s/√Hz
-  double sigma_sg = 0.0;   // 1/√Hz（陀螺比例因子过程噪声）
-  double sigma_sa = 0.0;   // 1/√Hz（加速度计比例因子过程噪声）
+  double sigma_ba = 0.0;   // m/s^2（GM 稳态 STD）或 m/s^2/√Hz（RW 驱动噪声）
+  double sigma_bg = 0.0;   // rad/s（GM 稳态 STD）或 rad/s/√Hz（RW 驱动噪声）
+  double sigma_sg = 0.0;   // 1（GM 稳态 STD）或 1/√Hz（RW 驱动噪声）
+  double sigma_sa = 0.0;   // 1（GM 稳态 STD）或 1/√Hz（RW 驱动噪声）
   // 逐轴过程噪声；各元素 >= 0 时优先于对应标量字段，否则回退到标量字段
   Vector3d sigma_ba_vec = Vector3d::Constant(-1.0);
   Vector3d sigma_bg_vec = Vector3d::Constant(-1.0);
@@ -104,6 +107,9 @@ struct NoiseParams {
   //   驱动噪声自动计算为 σ_w = σ_ss * √(2/T)
   // ≤0 时使用随机游走模型：sigma 参数直接作为驱动噪声密度
   double markov_corr_time = 0.0;
+  // 兼容旧配置保留；当前实现已与 KF-GINS 对齐，名义 ba/bg/sg/sa
+  // 在预测步中均保持分段常值，因此该字段不再改变传播行为。
+  bool disable_nominal_ba_bg_decay = false;
 };
 
 // 状态维数定义: p(3)+v(3)+phi(3)+ba(3)+bg(3)+sg(3)+sa(3)+odo_scale(1)+mounting(3)+lever(3)+gnss_lever(3)=31
@@ -111,7 +117,11 @@ struct NoiseParams {
 constexpr int kStateDim = 31;
 // 实际使用的状态维度(不含预留)
 constexpr int kActualStateDim = 31;
+// current/KF-GINS predict 对比使用的公共状态顺序: p,v,att,ba,bg,sg,sa
+constexpr int kPredictDebugCommonDim = 21;
 using StateMask = std::array<bool, kStateDim>;
+using StateGainScale = std::array<double, kStateDim>;
+using StateMeasurementGainScale = Eigen::MatrixXd;
 
 // 31 维状态索引枚举，量测模型、注入与状态掩码优先使用该索引访问。
 struct StateIdx {
@@ -156,6 +166,8 @@ struct CovarianceFloor {
   double pos_var = 0.01;   // m^2
   double vel_var = 0.001;  // (m/s)^2
   double att_var = (0.01 * EIGEN_PI / 180.0) * (0.01 * EIGEN_PI / 180.0);       // rad^2
+  double odo_scale_var = 0.0;  // dimensionless^2
+  Vector3d lever_var = Vector3d::Zero();  // m^2
   double mounting_var = (0.1 * EIGEN_PI / 180.0) * (0.1 * EIGEN_PI / 180.0);     // rad^2
   double bg_var = 1e-8;    // (rad/s)^2
 };
@@ -185,6 +197,25 @@ struct CorrectionDebugSnapshot {
   MatrixXd S;
   MatrixXd K;
   Matrix<double, kStateDim, 1> dx = Matrix<double, kStateDim, 1>::Zero();
+};
+
+struct PredictDebugSnapshot {
+  bool valid = false;
+  double t_prev = 0.0;
+  double t_curr = 0.0;
+  double dt = 0.0;
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> P_before_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> Phi_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> Qd_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> PhiP_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> P_after_raw_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> P_after_final_common =
+      Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
 };
 
 /**
@@ -235,8 +266,12 @@ class InsMech {
    * 误差状态（NED系）：[δr^n, δv^n, φ, ba, bg, sg, sa, ...]
    *
    * @param C_bn 姿态矩阵 C_b^n (body -> NED)
-   * @param f_b 机体系比力
-   * @param omega_ib_b 机体系角速度
+   * @param f_b_corr 机体系修正后比力
+   * @param omega_ib_b_corr 机体系修正后角速度
+   * @param f_b_unbiased 机体系去零偏、未做比例因子修正的比力
+   * @param omega_ib_b_unbiased 机体系去零偏、未做比例因子修正的角速度
+   * @param sf_a 加速度计比例因子修正系数 (1+sa)^-1
+   * @param sf_g 陀螺比例因子修正系数 (1+sg)^-1
    * @param v_ned NED速度
    * @param lat 纬度（弧度）
    * @param h 高度（米）
@@ -246,8 +281,12 @@ class InsMech {
    * @param Qd 输出离散过程噪声
    */
   static void BuildProcessModel(const Matrix3d &C_bn,
-                                const Vector3d &f_b,
-                                const Vector3d &omega_ib_b,
+                                const Vector3d &f_b_corr,
+                                const Vector3d &omega_ib_b_corr,
+                                const Vector3d &f_b_unbiased,
+                                const Vector3d &omega_ib_b_unbiased,
+                                const Vector3d &sf_a,
+                                const Vector3d &sf_g,
                                 const Vector3d &v_ned,
                                 double lat, double h, double dt,
                                 const NoiseParams &np,
@@ -288,6 +327,12 @@ class EskfEngine {
   bool Predict();
 
   /**
+   * 使用显式给定的 IMU 对完成一次预测，并更新内部 prev/curr cache。
+   * 用于 GNSS 位于两个 IMU 时间戳之间时的分段传播。
+   */
+  bool PredictWithImuPair(const ImuData &imu_prev, const ImuData &imu_curr);
+
+  /**
    * 通用量测更新接口。
    * @param y 残差向量
    * @param H 观测矩阵
@@ -297,7 +342,9 @@ class EskfEngine {
   // 通用量测更新：残差 y，观测矩阵 H，噪声 R
   bool Correct(const VectorXd &y, const MatrixXd &H,
                const MatrixXd &R, VectorXd *dx_out = nullptr,
-               const StateMask *update_mask = nullptr);
+               const StateMask *update_mask = nullptr,
+               const StateGainScale *gain_scale = nullptr,
+               const StateMeasurementGainScale *gain_element_scale = nullptr);
 
   /**
    * 获取当前名义状态（只读引用）。
@@ -313,15 +360,22 @@ class EskfEngine {
   const CorrectionDebugSnapshot &last_correction_debug() const {
     return last_correction_debug_;
   }
+  const PredictDebugSnapshot &last_predict_debug() const {
+    return last_predict_debug_;
+  }
   /**
    * 获取当前 IMU 时间戳。
    */
   double timestamp() const { return curr_imu_.t; }
+  const ImuData &prev_imu() const { return prev_imu_; }
+  const ImuData &curr_imu() const { return curr_imu_; }
   void SetFejManager(FejManager *fej) { fej_ = fej; }
   void SetStateMask(const StateMask &mask);
   void SetCorrectionGuard(const CorrectionGuard &guard) { correction_guard_ = guard; }
   void SetNoiseParams(const NoiseParams &noise) { noise_ = noise; }
   void SetCovarianceFloor(const CovarianceFloor &floor) { covariance_floor_ = floor; }
+  void OverrideStateAndCov(const State &state,
+                           const Matrix<double, kStateDim, kStateDim> &P);
 
  private:
   // IMU 缓存状态机
@@ -340,7 +394,8 @@ class EskfEngine {
    * 将误差状态注入名义状态。
    * @param dx 15 维误差状态增量
    */
-  void InjectErrorState(const VectorXd &dx);
+  void InjectErrorState(const VectorXd &dx,
+                        const StateMask *update_mask = nullptr);
   /**
    * 使用 Joseph 形式更新协方差，保持对称正定。
    */
@@ -351,6 +406,11 @@ class EskfEngine {
   bool IsStateEnabledByMasks(int idx, const StateMask *update_mask) const;
   void ApplyStateMaskToDx(VectorXd &dx, const StateMask *update_mask) const;
   void ApplyUpdateMaskToKalmanGain(MatrixXd &K, const StateMask *update_mask) const;
+  void ApplyGainScaleToKalmanGain(MatrixXd &K,
+                                  const StateGainScale *gain_scale) const;
+  void ApplyElementGainScaleToKalmanGain(
+      MatrixXd &K,
+      const StateMeasurementGainScale *gain_element_scale) const;
   void ApplyStateMaskToCov();
   void ApplyCovarianceFloor();
   Matrix<double, kStateDim, kStateDim> BuildTrueInEkfResetGamma(
@@ -372,4 +432,5 @@ class EskfEngine {
   CovarianceFloor covariance_floor_{};
   TrueInEkfCorrectionSnapshot last_true_iekf_correction_{};
   CorrectionDebugSnapshot last_correction_debug_{};
+  PredictDebugSnapshot last_predict_debug_{};
 };
