@@ -43,6 +43,19 @@ from scripts.analysis.odo_nhc_update_sweep import ensure_dir, rel_from_root
 
 EXP_ID_DEFAULT = "EXP-20260328-data2-kf-gins-outage-contributor-breakdown-r1"
 OUTPUT_DIR_DEFAULT = REPO_ROOT / "output" / "d2_kf_outage_contrib_r1"
+SHARED_STEP_DIR_DEFAULT = REPO_ROOT / "output" / "d2_kf_outage_substep_r1"
+CURRENT_GNSS_DEBUG_DEFAULT = (
+    REPO_ROOT
+    / "output"
+    / "d2_outage_fix_dbg_r4"
+    / "artifacts"
+    / "cases"
+    / "data2_baseline_ins_gnss_outage_no_odo_nhc_gnss_lever_truth_fixed"
+    / "gnss_updates_data2_baseline_ins_gnss_outage_no_odo_nhc_gnss_lever_truth_fixed.csv"
+)
+KF_GNSS_DEBUG_DEFAULT = (
+    REPO_ROOT / "output" / "d2_kf_outage_dbg_r2" / "kf_gins" / "gnss_updates_kf_gins.csv"
+)
 
 CURRENT_SOL_DEFAULT = (
     REPO_ROOT / "output" / "d2_outage_fix_dbg_r4"
@@ -182,6 +195,14 @@ def load_current_sol(path: Path) -> pd.DataFrame:
     ]
     if len(frame.columns) == len(expected):
         frame.columns = expected
+    # Normalize attitude access so current SOL matches the KF-GINS/truth loaders.
+    for unified_col, fused_col in (
+        ("roll_deg", "fused_roll"),
+        ("pitch_deg", "fused_pitch"),
+        ("yaw_deg", "fused_yaw"),
+    ):
+        if fused_col in frame.columns and unified_col not in frame.columns:
+            frame[unified_col] = frame[fused_col]
     return frame
 
 
@@ -193,6 +214,51 @@ def load_kf_nav(path: Path) -> pd.DataFrame:
         "vn_mps", "ve_mps", "vd_mps",
         "roll_deg", "pitch_deg", "yaw_deg",
     ]
+    return frame
+
+
+def load_shared_step_rows(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    required = {"window_name", "interval_start_t", "interval_end_t", "step_idx", "current_t", "kf_t"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"missing shared-step columns in {path}: {sorted(missing)}")
+    return frame.sort_values(["interval_start_t", "step_idx"]).reset_index(drop=True)
+
+
+def load_current_gnss_debug(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    required = {
+        "gnss_t",
+        "state_t",
+        "state_p_after_x",
+        "state_p_after_y",
+        "state_p_after_z",
+        "state_v_after_x",
+        "state_v_after_y",
+        "state_v_after_z",
+    }
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"missing current GNSS debug columns in {path}: {sorted(missing)}")
+    return frame
+
+
+def load_kf_gnss_debug(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    required = {
+        "gnss_t",
+        "state_t",
+        "state_pos_after_x",
+        "state_pos_after_y",
+        "state_pos_after_z",
+        "state_vel_after_x",
+        "state_vel_after_y",
+        "state_vel_after_z",
+    }
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"missing KF GNSS debug columns in {path}: {sorted(missing)}")
     return frame
 
 
@@ -415,6 +481,169 @@ def analyse_window(
     return step_df, summary_df
 
 
+def analyse_window_from_shared_rows(
+    window_name: str,
+    current_sol: pd.DataFrame,
+    kf_nav: pd.DataFrame,
+    truth: pd.DataFrame,
+    shared_rows: pd.DataFrame,
+    current_gnss_debug: pd.DataFrame,
+    kf_gnss_debug: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compute contributor breakdown only on shared predict substeps from the
+    prior substep audit. Window summary is the median of per-interval
+    cumulative contributors, matching the shared 199-step contract.
+    """
+    if shared_rows.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    current_index = {float(ts): idx for idx, ts in enumerate(current_sol["timestamp"].to_numpy(float))}
+    kf_index = {float(ts): idx for idx, ts in enumerate(kf_nav["timestamp"].to_numpy(float))}
+    current_gnss_index = {
+        float(ts): row for ts, row in zip(
+            current_gnss_debug["gnss_t"].to_numpy(float),
+            current_gnss_debug.itertuples(index=False),
+        )
+    }
+    kf_gnss_index = {
+        float(ts): row for ts, row in zip(
+            kf_gnss_debug["gnss_t"].to_numpy(float),
+            kf_gnss_debug.itertuples(index=False),
+        )
+    }
+    basis_cache: dict[tuple[float, float], tuple[np.ndarray, np.ndarray]] = {}
+
+    rows: list[dict[str, Any]] = []
+    grouped = shared_rows.groupby(["interval_start_t", "interval_end_t"], sort=True)
+    for interval_key, interval_group in grouped:
+        interval_key = (float(interval_key[0]), float(interval_key[1]))
+        if interval_key not in basis_cache:
+            basis_cache[interval_key] = along_cross_basis(truth, interval_key[0], interval_key[1])
+        along_2d, cross_2d = basis_cache[interval_key]
+
+        try:
+            current_start = current_gnss_index[interval_key[0]]
+            kf_start = kf_gnss_index[interval_key[0]]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"missing GNSS debug row for interval start {interval_key[0]} in {window_name}"
+            ) from exc
+
+        prev_cur_t = float(current_start.state_t)
+        prev_cur_p = np.array(
+            [current_start.state_p_after_x, current_start.state_p_after_y, current_start.state_p_after_z],
+            dtype=float,
+        )
+        prev_cur_v = np.array(
+            [current_start.state_v_after_x, current_start.state_v_after_y, current_start.state_v_after_z],
+            dtype=float,
+        )
+        prev_kf_t = float(kf_start.state_t)
+        prev_kf_lat_deg = math.degrees(float(kf_start.state_pos_after_x))
+        prev_kf_lon_deg = math.degrees(float(kf_start.state_pos_after_y))
+        prev_kf_h_m = float(kf_start.state_pos_after_z)
+        prev_kf_v = np.array(
+            [kf_start.state_vel_after_x, kf_start.state_vel_after_y, kf_start.state_vel_after_z],
+            dtype=float,
+        )
+
+        for shared_row in interval_group.itertuples(index=False):
+            tc_curr = float(shared_row.current_t)
+            tk_curr = float(shared_row.kf_t)
+            cur_idx = current_index[tc_curr]
+            kf_idx = kf_index[tk_curr]
+
+            dt_cur = tc_curr - prev_cur_t
+            dt_kf = tk_curr - prev_kf_t
+            if dt_cur <= 0.0 or dt_kf <= 0.0:
+                raise RuntimeError(
+                    f"non-positive dt in {window_name} interval={interval_key[0]}->{interval_key[1]} "
+                    f"step={shared_row.step_idx}: current={dt_cur}, kf={dt_kf}"
+                )
+
+            v_ecef_curr = current_sol.iloc[cur_idx][["fused_vx", "fused_vy", "fused_vz"]].to_numpy(float)
+            c_cur = contributors_current(prev_cur_p, prev_cur_v, v_ecef_curr, dt_cur)
+
+            v_ned_curr = kf_nav.iloc[kf_idx][["vn_mps", "ve_mps", "vd_mps"]].to_numpy(float)
+            c_kf = contributors_kf(prev_kf_lat_deg, prev_kf_lon_deg, prev_kf_h_m, prev_kf_v, v_ned_curr, dt_kf)
+
+            delta: dict[str, np.ndarray] = {}
+            for key in ("dv_total", "dv_g", "dv_c", "dv_sf"):
+                delta[key] = c_cur[key] - c_kf[key]
+
+            def flat(prefix: str, v: np.ndarray) -> dict[str, float]:
+                d = decompose(v, along_2d, cross_2d)
+                return {f"{prefix}_{k}": value for k, value in d.items()}
+
+            row: dict[str, Any] = {
+                "window": window_name,
+                "interval_start_t": interval_key[0],
+                "interval_end_t": interval_key[1],
+                "step_idx": int(shared_row.step_idx),
+                "t_curr": tc_curr,
+                "dt_current": float(dt_cur),
+                "dt_kf": float(dt_kf),
+            }
+            for key in ("dv_total", "dv_g", "dv_c", "dv_sf"):
+                row.update(flat(f"cur_{key}", c_cur[key]))
+                row.update(flat(f"kf_{key}", c_kf[key]))
+                row.update(flat(f"delta_{key}", delta[key]))
+            rows.append(row)
+
+            prev_cur_t = tc_curr
+            prev_cur_p = current_sol.iloc[cur_idx][["fused_x", "fused_y", "fused_z"]].to_numpy(float)
+            prev_cur_v = v_ecef_curr
+            prev_kf_t = tk_curr
+            prev_kf_lat_deg = float(kf_nav.iloc[kf_idx]["lat_deg"])
+            prev_kf_lon_deg = float(kf_nav.iloc[kf_idx]["lon_deg"])
+            prev_kf_h_m = float(kf_nav.iloc[kf_idx]["h_m"])
+            prev_kf_v = v_ned_curr
+
+    step_df = pd.DataFrame(rows)
+    if step_df.empty:
+        return step_df, pd.DataFrame()
+
+    interval_rows: list[dict[str, Any]] = []
+    grouped_step_df = step_df.groupby(["interval_start_t", "interval_end_t"], sort=True)
+    n_steps_per_interval = int(grouped_step_df.size().median())
+    n_intervals = int(grouped_step_df.ngroups)
+    for contributor in ("dv_total", "dv_g", "dv_c", "dv_sf"):
+        for solver in ("cur", "kf", "delta"):
+            interval_values: list[np.ndarray] = []
+            for _, group in grouped_step_df:
+                interval_values.append(
+                    np.array(
+                        [
+                            group[f"{solver}_{contributor}_along"].sum(),
+                            group[f"{solver}_{contributor}_cross"].sum(),
+                            group[f"{solver}_{contributor}_down"].sum(),
+                        ],
+                        dtype=float,
+                    )
+                )
+            mat = np.vstack(interval_values)
+            median_vec = np.median(mat, axis=0)
+            norms = np.linalg.norm(mat, axis=1)
+            interval_rows.append(
+                {
+                    "window": window_name,
+                    "solver": solver,
+                    "contributor": contributor,
+                    "cum_along": float(median_vec[0]),
+                    "cum_cross": float(median_vec[1]),
+                    "cum_down": float(median_vec[2]),
+                    "cum_norm": float(np.median(norms)),
+                    "n_steps_per_interval": n_steps_per_interval,
+                    "n_intervals": n_intervals,
+                    "summary_mode": "median_interval_cumulative",
+                }
+            )
+
+    summary_df = pd.DataFrame(interval_rows)
+    return step_df, summary_df
+
+
 # ---------------------------------------------------------------------------
 # Attitude comparison at window start
 # ---------------------------------------------------------------------------
@@ -424,6 +653,7 @@ def attitude_at_window_start(
     t_start: int,
     current_sol: pd.DataFrame,
     kf_nav: pd.DataFrame,
+    step_count: int = 199,
 ) -> dict[str, Any]:
     """Extract roll/pitch/yaw for both solvers at the first row >= t_start."""
     tol = 0.1
@@ -463,7 +693,8 @@ def attitude_at_window_start(
     d_att_rad = math.radians(row_out["d_att_norm_deg"])
     typical_specific_force_step = 9.8 * 0.01  # [m/s] per step
     row_out["expected_dv_sf_per_step_m_s"] = d_att_rad * typical_specific_force_step
-    row_out["expected_cum_dv_sf_199steps_m_s"] = row_out["expected_dv_sf_per_step_m_s"] * 199
+    row_out["shared_step_count"] = int(step_count)
+    row_out["expected_cum_dv_sf_m_s"] = row_out["expected_dv_sf_per_step_m_s"] * float(step_count)
 
     # Also read bias if available in SOL
     for col in ("ba_x", "ba_y", "ba_z", "bg_x", "bg_y", "bg_z"):
@@ -508,7 +739,7 @@ def build_summary(
             f"  - delta roll/pitch/yaw = {arow['d_roll_deg']:.4f}/{arow['d_pitch_deg']:.4f}/{arow['d_yaw_deg']:.4f} deg",
             f"  - delta att norm = {arow['d_att_norm_deg']:.4f} deg = {math.radians(arow['d_att_norm_deg']) * 1000:.4f} mrad",
             f"  - expected dv_sf per step (simple estimate) = {arow['expected_dv_sf_per_step_m_s'] * 1e6:.1f} µm/s",
-            f"  - expected cum dv_sf over 199 steps = {arow['expected_cum_dv_sf_199steps_m_s'] * 1000:.3f} mm/s",
+            f"  - expected cum dv_sf over {int(arow['shared_step_count'])} shared steps = {arow['expected_cum_dv_sf_m_s'] * 1000:.3f} mm/s",
         ]
         if "cur_ba_x" in arow:
             lines.append(
@@ -529,7 +760,10 @@ def build_summary(
                 f"cross={r['cum_cross']:+.6f}  down={r['cum_down']:+.6f}  "
                 f"norm={r['cum_norm']:.6f}  fraction_of_total={frac:.4f}"
             )
-        lines.append(f"  (n_steps = {int(delta_ws['n_steps'].iloc[0])})")
+        lines.append(
+            f"  (median across {int(delta_ws['n_intervals'].iloc[0])} intervals,"
+            f" {int(delta_ws['n_steps_per_interval'].iloc[0])} shared steps per interval)"
+        )
         lines.append("")
 
     lines += [
@@ -538,7 +772,7 @@ def build_summary(
         "If dv_sf dominates (fraction > 0.9) and dv_g + dv_c fractions are < 0.1:",
         "  → attitude-driven specific-force projection is the dominant per-step error source.",
         "  → The attitude difference at the window start (see above) should predict the",
-        "    observed dv_sf magnitude: |d_att_rad| * g * dt * 199 ≈ cum_delta_dv_sf_norm.",
+        "    observed dv_sf magnitude: |d_att_rad| * g * dt * shared_step_count ≈ median cum_delta_dv_sf_norm.",
         "",
         "If the predicted magnitude matches the observed magnitude and the direction",
         "(along/cross pattern) is consistent across w1 and w2, this confirms:",
@@ -561,6 +795,9 @@ def main() -> int:
     parser.add_argument("--sol",         default=str(CURRENT_SOL_DEFAULT), type=Path)
     parser.add_argument("--kf-nav",      default=str(KF_NAV_DEFAULT),     type=Path)
     parser.add_argument("--truth",       default=str(TRUTH_DEFAULT),      type=Path)
+    parser.add_argument("--current-gnss-debug", default=str(CURRENT_GNSS_DEBUG_DEFAULT), type=Path)
+    parser.add_argument("--kf-gnss-debug", default=str(KF_GNSS_DEBUG_DEFAULT), type=Path)
+    parser.add_argument("--shared-step-dir", default=str(SHARED_STEP_DIR_DEFAULT), type=Path)
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir
@@ -570,6 +807,9 @@ def main() -> int:
         "current_sol": args.sol,
         "kf_nav":      args.kf_nav,
         "truth":       args.truth,
+        "current_gnss_debug": args.current_gnss_debug,
+        "kf_gnss_debug": args.kf_gnss_debug,
+        "shared_step_dir": args.shared_step_dir,
     }
     for k, v in inputs.items():
         if not v.exists():
@@ -582,6 +822,10 @@ def main() -> int:
     kf_nav = load_kf_nav(args.kf_nav)
     print(f"Loading truth: {args.truth}")
     truth = load_truth(args.truth)
+    print(f"Loading current GNSS debug: {args.current_gnss_debug}")
+    current_gnss_debug = load_current_gnss_debug(args.current_gnss_debug)
+    print(f"Loading KF-GINS GNSS debug: {args.kf_gnss_debug}")
+    kf_gnss_debug = load_kf_gnss_debug(args.kf_gnss_debug)
 
     # Convert current ECEF velocity to NED (only used for attitude-at-start extraction)
     # The per-step computation works in ECEF directly.
@@ -592,13 +836,19 @@ def main() -> int:
 
     for win_name, (t_start, t_end) in WINDOW_SPECS.items():
         print(f"Processing window {win_name} [{t_start}, {t_end}] ...")
-        step_df, summary_df = analyse_window(
-            win_name, t_start, t_end, current_sol, kf_nav, truth
+        shared_step_path = args.shared_step_dir / f"shared_step_rows_{win_name}.csv"
+        if not shared_step_path.exists():
+            print(f"ERROR: shared-step input not found: {shared_step_path}", file=sys.stderr)
+            return 1
+        shared_rows = load_shared_step_rows(shared_step_path)
+        step_df, summary_df = analyse_window_from_shared_rows(
+            win_name, current_sol, kf_nav, truth, shared_rows, current_gnss_debug, kf_gnss_debug
         )
         step_dfs[win_name]    = step_df
         win_summaries[win_name] = summary_df
 
-        att_row = attitude_at_window_start(win_name, t_start, current_sol, kf_nav)
+        step_count = int(summary_df["n_steps_per_interval"].iloc[0]) if not summary_df.empty else 199
+        att_row = attitude_at_window_start(win_name, t_start, current_sol, kf_nav, step_count=step_count)
         att_rows.append(att_row)
 
         if not step_df.empty:
@@ -607,7 +857,10 @@ def main() -> int:
             print(f"  Wrote {step_path.name} ({len(step_df)} rows)")
 
         if not summary_df.empty:
-            print(f"  {win_name} step count: {summary_df['n_steps'].iloc[0]}")
+            print(
+                f"  {win_name} interval_count: {summary_df['n_intervals'].iloc[0]}, "
+                f"shared_step_count: {summary_df['n_steps_per_interval'].iloc[0]}"
+            )
             delta_total = summary_df[
                 (summary_df["solver"] == "delta") & (summary_df["contributor"] == "dv_total")
             ]

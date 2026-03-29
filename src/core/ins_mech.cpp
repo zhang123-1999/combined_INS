@@ -82,6 +82,7 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
 
   // 零偏 + 比例因子 + 地球自转补偿后的角增量/速度增量
   Vector3d omega_ie_b = out.Cbn.transpose() * kOmegaIeE;
+  out.omega_ie_b = omega_ie_b;
   // 1) 去零偏
   Vector3d dtheta_bc_prev = imu_prev.dtheta - state.bg * imu_prev.dt;
   Vector3d dtheta_bc_curr = imu_curr.dtheta - state.bg * dt;
@@ -90,10 +91,18 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
   // 2) 补偿比例因子: bias_corrected / (1 + s)
   Vector3d sf_g = (Vector3d::Ones() + state.sg).cwiseInverse();
   Vector3d sf_a = (Vector3d::Ones() + state.sa).cwiseInverse();
-  Vector3d dtheta_prev = sf_g.cwiseProduct(dtheta_bc_prev) - omega_ie_b * imu_prev.dt;
-  Vector3d dtheta_curr = sf_g.cwiseProduct(dtheta_bc_curr) - omega_ie_b * dt;
+  Vector3d dtheta_prev_imu_corr = sf_g.cwiseProduct(dtheta_bc_prev);
+  Vector3d dtheta_curr_imu_corr = sf_g.cwiseProduct(dtheta_bc_curr);
+  Vector3d dtheta_prev = dtheta_prev_imu_corr - omega_ie_b * imu_prev.dt;
+  Vector3d dtheta_curr = dtheta_curr_imu_corr - omega_ie_b * dt;
   Vector3d dvel_prev = sf_a.cwiseProduct(dvel_bc_prev);
   Vector3d dvel_curr = sf_a.cwiseProduct(dvel_bc_curr);
+  out.dtheta_prev_imu_corr = dtheta_prev_imu_corr;
+  out.dtheta_curr_imu_corr = dtheta_curr_imu_corr;
+  out.dtheta_prev_corr = dtheta_prev;
+  out.dtheta_curr_corr = dtheta_curr;
+  out.dvel_prev_corr = dvel_prev;
+  out.dvel_curr_corr = dvel_curr;
 
   // 双子样圆锥/划桨补偿，提升高频旋转/运动精度
   Vector3d coning = dtheta_curr;
@@ -102,6 +111,8 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
     coning += dtheta_prev.cross(dtheta_curr) / 12.0;
     sculling += (dtheta_prev.cross(dvel_curr) + dvel_prev.cross(dtheta_curr)) / 12.0;
   }
+  out.coning = coning;
+  out.sculling = sculling;
 
   // 姿态用中值四元数更新，速度使用中值姿态旋转的比力
   Vector4d dq_mid = QuatFromSmallAngle(coning * 0.5);
@@ -114,9 +125,12 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
   next.q = NormalizeQuat(QuatMultiply(state.q, dq));
   Matrix3d Cbn_next = QuatToRot(next.q);
   Vector3d dv_nav = R_mid * sculling;
+  Vector3d dv_nav_prev_att = out.Cbn * sculling;
   Vector3d gravity_e = GravityEcef(state.p);
   Vector3d coriolis = -2.0 * kOmegaIeE.cross(state.v);
-  Vector3d v_next = state.v + dv_nav + (gravity_e + coriolis) * dt;
+  Vector3d gravity_dt = gravity_e * dt;
+  Vector3d coriolis_dt = coriolis * dt;
+  Vector3d v_next = state.v + dv_nav + gravity_dt + coriolis_dt;
   next.v = v_next;
   next.p = state.p + 0.5 * (state.v + v_next) * dt;
 
@@ -124,6 +138,10 @@ PropagationResult InsMech::Propagate(const State &state, const ImuData &imu_prev
   out.Cbn = Cbn_next;
   out.f_b = sculling / dt;
   out.omega_b = coning / dt;  // 近似为 ω_nb^b
+  out.dv_nav = dv_nav;
+  out.dv_nav_prev_att = dv_nav_prev_att;
+  out.gravity_dt = gravity_dt;
+  out.coriolis_dt = coriolis_dt;
   return out;
 }
 

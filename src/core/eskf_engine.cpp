@@ -158,6 +158,19 @@ bool EskfEngine::PredictWithImuPair(const ImuData &imu_prev,
   last_predict_debug_.PhiP_common = ExtractPredictCommonBlock(PhiP);
   last_predict_debug_.P_after_raw_common = ExtractPredictCommonBlock(P_after_raw);
   last_predict_debug_.P_after_final_common = ExtractPredictCommonBlock(P_);
+  last_predict_debug_.omega_ie_b = res.omega_ie_b;
+  last_predict_debug_.dtheta_prev_imu_corr = res.dtheta_prev_imu_corr;
+  last_predict_debug_.dtheta_curr_imu_corr = res.dtheta_curr_imu_corr;
+  last_predict_debug_.dtheta_prev_corr = res.dtheta_prev_corr;
+  last_predict_debug_.dtheta_curr_corr = res.dtheta_curr_corr;
+  last_predict_debug_.dvel_prev_corr = res.dvel_prev_corr;
+  last_predict_debug_.dvel_curr_corr = res.dvel_curr_corr;
+  last_predict_debug_.coning = res.coning;
+  last_predict_debug_.sculling = res.sculling;
+  last_predict_debug_.dv_nav = res.dv_nav;
+  last_predict_debug_.dv_nav_prev_att = res.dv_nav_prev_att;
+  last_predict_debug_.gravity_dt = res.gravity_dt;
+  last_predict_debug_.coriolis_dt = res.coriolis_dt;
   return true;
 }
 

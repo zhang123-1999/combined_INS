@@ -216,6 +216,19 @@ struct PredictDebugSnapshot {
       Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
   Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim> P_after_final_common =
       Matrix<double, kPredictDebugCommonDim, kPredictDebugCommonDim>::Zero();
+  Vector3d omega_ie_b = Vector3d::Zero();
+  Vector3d dtheta_prev_imu_corr = Vector3d::Zero();
+  Vector3d dtheta_curr_imu_corr = Vector3d::Zero();
+  Vector3d dtheta_prev_corr = Vector3d::Zero();
+  Vector3d dtheta_curr_corr = Vector3d::Zero();
+  Vector3d dvel_prev_corr = Vector3d::Zero();
+  Vector3d dvel_curr_corr = Vector3d::Zero();
+  Vector3d coning = Vector3d::Zero();
+  Vector3d sculling = Vector3d::Zero();
+  Vector3d dv_nav = Vector3d::Zero();
+  Vector3d dv_nav_prev_att = Vector3d::Zero();
+  Vector3d gravity_dt = Vector3d::Zero();
+  Vector3d coriolis_dt = Vector3d::Zero();
 };
 
 /**
@@ -240,6 +253,19 @@ struct PropagationResult {
   Matrix3d Cbn;   ///< C_b^n：将体系向量变换到导航系，即 v_n = Cbn * v_b
   Vector3d f_b;
   Vector3d omega_b;
+  Vector3d omega_ie_b{Vector3d::Zero()};
+  Vector3d dtheta_prev_imu_corr{Vector3d::Zero()};
+  Vector3d dtheta_curr_imu_corr{Vector3d::Zero()};
+  Vector3d dtheta_prev_corr{Vector3d::Zero()};
+  Vector3d dtheta_curr_corr{Vector3d::Zero()};
+  Vector3d dvel_prev_corr{Vector3d::Zero()};
+  Vector3d dvel_curr_corr{Vector3d::Zero()};
+  Vector3d coning{Vector3d::Zero()};
+  Vector3d sculling{Vector3d::Zero()};
+  Vector3d dv_nav{Vector3d::Zero()};
+  Vector3d dv_nav_prev_att{Vector3d::Zero()};
+  Vector3d gravity_dt{Vector3d::Zero()};
+  Vector3d coriolis_dt{Vector3d::Zero()};
 };
 
 /**

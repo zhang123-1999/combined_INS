@@ -699,7 +699,14 @@ void DiagnosticsEngine::Initialize(const Dataset &dataset, const FusionOptions &
       impl_->predict_debug_file
           << "step_index,tag,t_prev,t_curr,dt,"
           << "p_before_common_mat,phi_common_mat,qd_common_mat,"
-          << "phi_p_common_mat,p_after_raw_common_mat,p_after_final_common_mat\n";
+          << "phi_p_common_mat,p_after_raw_common_mat,p_after_final_common_mat,"
+          << "omega_ie_b_vec,"
+          << "dtheta_prev_imu_corr_vec,dtheta_curr_imu_corr_vec,"
+          << "dtheta_prev_corr_vec,dtheta_curr_corr_vec,"
+          << "dvel_prev_corr_vec,dvel_curr_corr_vec,"
+          << "coning_vec,sculling_vec,"
+          << "dv_nav_vec,dv_nav_prev_att_vec,"
+          << "gravity_dt_vec,coriolis_dt_vec\n";
     }
   }
 }
@@ -1216,7 +1223,20 @@ void DiagnosticsEngine::LogPredict(const string &tag, const EskfEngine &engine) 
       << MatrixToCsvField(snap.Qd_common) << ","
       << MatrixToCsvField(snap.PhiP_common) << ","
       << MatrixToCsvField(snap.P_after_raw_common) << ","
-      << MatrixToCsvField(snap.P_after_final_common) << "\n";
+      << MatrixToCsvField(snap.P_after_final_common) << ","
+      << VectorToCsvField(snap.omega_ie_b) << ","
+      << VectorToCsvField(snap.dtheta_prev_imu_corr) << ","
+      << VectorToCsvField(snap.dtheta_curr_imu_corr) << ","
+      << VectorToCsvField(snap.dtheta_prev_corr) << ","
+      << VectorToCsvField(snap.dtheta_curr_corr) << ","
+      << VectorToCsvField(snap.dvel_prev_corr) << ","
+      << VectorToCsvField(snap.dvel_curr_corr) << ","
+      << VectorToCsvField(snap.coning) << ","
+      << VectorToCsvField(snap.sculling) << ","
+      << VectorToCsvField(snap.dv_nav) << ","
+      << VectorToCsvField(snap.dv_nav_prev_att) << ","
+      << VectorToCsvField(snap.gravity_dt) << ","
+      << VectorToCsvField(snap.coriolis_dt) << "\n";
 }
 
 // ---------- CheckGravityAlignment ----------
