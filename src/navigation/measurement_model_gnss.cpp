@@ -39,19 +39,7 @@ MeasurementLinearization BuildGnssPositionMeasurement(
   model.y = -dr_ned;
 
   model.H.block<3, 3>(0, StateIdx::kPos) = Matrix3d::Identity();
-  if (use_inekf) {
-    const bool use_local_position = input.context.ri_gnss_pos_use_p_ned_local;
-    if (use_local_position) {
-      const Vector3d p_ned_local =
-          frame.R_ne.transpose() * (input.state.p - input.context.p_init_ecef);
-      model.H.block<3, 3>(0, StateIdx::kAtt) =
-          -(Skew(p_ned_local) + Skew(lever_ned));
-    } else {
-      model.H.block<3, 3>(0, StateIdx::kAtt) = -Skew(lever_ned);
-    }
-  } else {
-    model.H.block<3, 3>(0, StateIdx::kAtt) = Skew(lever_ned);
-  }
+  model.H.block<3, 3>(0, StateIdx::kAtt) = Skew(lever_ned);
   model.H.block<3, 3>(0, StateIdx::kGnssLever) = frame.C_bn;
   model.R = (input.sigma_gnss.cwiseProduct(input.sigma_gnss)).asDiagonal();
   return model;
@@ -87,11 +75,7 @@ MeasurementLinearization BuildGnssVelocityMeasurement(
       frame.C_bn * Skew(input.state.gnss_lever_arm) * rates.omega_ib_corr;
   const Matrix3d H_phi_2 = -Skew(Cb_l_cross_omega_H);
   const Matrix3d H_phi = H_phi_1 + H_phi_2;
-  if (use_inekf) {
-    model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
-  } else {
-    model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
-  }
+  model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;
 
   model.H.block<3, 3>(0, StateIdx::kBg) =
       frame.C_bn * Skew(input.state.gnss_lever_arm) * rates.sf_g.asDiagonal();

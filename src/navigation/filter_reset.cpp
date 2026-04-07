@@ -46,8 +46,6 @@ void NavigationFilterEngine::InjectErrorState(const VectorXd &dx,
   const FilterSemantics effective_semantics = ResolveEffectiveSemantics();
   const bool use_inekf =
       effective_semantics.flavor != FilterFlavor::kStandardEskf;
-  const bool ri_inject_pos_inverse =
-      (inekf_ == nullptr) ? true : inekf_->ri_inject_pos_inverse;
 
   const Llh llh = EcefToLlh(state_.p);
   const Matrix3d R_ne = RotNedToEcef(llh);
@@ -66,31 +64,15 @@ void NavigationFilterEngine::InjectErrorState(const VectorXd &dx,
 
     const Vector4d dq = QuatFromSmallAngle(phi_body);
     state_.q = NormalizeQuat(QuatMultiply(state_.q, dq));
-  } else if (use_inekf) {
-    const Vector3d v_ned_nom = R_ne.transpose() * state_.v;
-    dv_ned -= Skew(v_ned_nom) * dphi_ned;
-    if (ri_inject_pos_inverse) {
-      const Vector3d p_init_ecef =
-          (inekf_ == nullptr) ? Vector3d::Zero() : inekf_->p_init_ecef;
-      const Vector3d p_ned_local = R_ne.transpose() * (state_.p - p_init_ecef);
-      dr_ned -= Skew(p_ned_local) * dphi_ned;
-    }
-  }
-
-  if (!use_inekf) {
+  } else {
     state_.p += R_ne * dr_ned;
     state_.v += R_ne * dv_ned;
 
     const Vector3d dphi_ecef = R_ne * dphi_ned;
-    if (use_inekf) {
-      const Vector4d dq = QuatFromSmallAngle(dphi_ecef);
-      state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
-    } else {
-      // Preserve the historical standard-ESKF quaternion injection contract
-      // used by the accepted data2/data5 baselines.
-      const Vector4d dq = QuatFromSmallAngle(-dphi_ecef);
-      state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
-    }
+    // Preserve the historical standard-ESKF quaternion injection contract
+    // used by the accepted data2/data5 baselines.
+    const Vector4d dq = QuatFromSmallAngle(-dphi_ecef);
+    state_.q = NormalizeQuat(QuatMultiply(dq, state_.q));
   }
 
   state_.ba += dba;

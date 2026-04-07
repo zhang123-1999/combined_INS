@@ -39,6 +39,26 @@ void WriteTextFile(const string &path, const string &text) {
   fout << text;
 }
 
+string ReadTextFile(const string &path) {
+  ifstream fin(path, ios::binary);
+  Expect(static_cast<bool>(fin), "failed to open text file: " + path);
+  return string((istreambuf_iterator<char>(fin)),
+                istreambuf_iterator<char>());
+}
+
+size_t CountOccurrences(const string &text, const string &needle) {
+  if (needle.empty()) {
+    return 0;
+  }
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = text.find(needle, pos)) != string::npos) {
+    ++count;
+    pos += needle.size();
+  }
+  return count;
+}
+
 Vector3d RotationVectorFromQuat(const Vector4d &q_delta_raw) {
   Vector4d q_delta = NormalizeQuat(q_delta_raw);
   if (q_delta[0] < 0.0) {
@@ -1176,6 +1196,27 @@ void TestInEkfGnssPositionAttitudeJacobianMatchesFiniteDifference() {
          "true-InEKF GNSS_POS GNSS-lever Jacobian should match finite differences");
 }
 
+void TestFilterResetSourceHasNoDeadInEkfBranches() {
+  const string source = ReadTextFile("src/navigation/filter_reset.cpp");
+  Expect(source.find("else if (use_inekf)") == string::npos,
+         "filter_reset.cpp should not keep an unreachable else-if(use_inekf) branch");
+  Expect(source.find("QuatFromSmallAngle(dphi_ecef)") == string::npos,
+         "filter_reset.cpp should not keep the dead positive-dphi ESKF attitude injection branch");
+}
+
+void TestGnssMeasurementSourceHasNoDeadInEkfBranches() {
+  const string source =
+      ReadTextFile("src/navigation/measurement_model_gnss.cpp");
+  Expect(source.find(
+             "const bool use_local_position = input.context.ri_gnss_pos_use_p_ned_local;") ==
+             string::npos,
+         "measurement_model_gnss.cpp should not keep the dead GNSS_POS ri_gnss_pos_use_p_ned_local branch");
+  Expect(CountOccurrences(
+             source,
+             "model.H.block<3, 3>(0, StateIdx::kAtt) = H_phi;") == 1,
+         "measurement_model_gnss.cpp should assign GNSS_VEL H_phi exactly once");
+}
+
 void TestInEkfSemanticBranches() {
   InEkfConfig disabled;
   disabled.enabled = false;
@@ -2208,6 +2249,8 @@ int main() {
     TestUwbMeasurementContractUsesMeasurementMinusPrediction();
     TestLegacyMeasurementWrappersMatchUnifiedBuilders();
     TestInEkfGnssPositionAttitudeJacobianMatchesFiniteDifference();
+    TestFilterResetSourceHasNoDeadInEkfBranches();
+    TestGnssMeasurementSourceHasNoDeadInEkfBranches();
     TestInEkfSemanticBranches();
     TestStateBlockCatalogMatchesLegacyStateIndices();
     TestLoadOptionsFailFast();
