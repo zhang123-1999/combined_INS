@@ -113,8 +113,8 @@ void NavigationFilterEngine::ApplyMarkovNominalPropagation(State &state,
   (void)state;
   (void)dt;
   (void)noise_;
-  // Align with KF-GINS: nominal ba/bg/sg/sa remain piecewise constant
-  // between measurement-feedback steps. The GM model is kept only in F/Q.
+  // Keep nominal inertial sensor error states piecewise constant between
+  // measurement-feedback steps. The GM model is kept only in F/Q.
 }
 
 bool NavigationFilterEngine::Correct(

@@ -9,7 +9,7 @@ ESKF融合导航结果可视化分析脚本
      fused_roll fused_pitch fused_yaw mounting_pitch mounting_yaw odo_scale
      sg_x sg_y sg_z sa_x sa_y sa_z ba_x ba_y ba_z bg_x bg_y bg_z
      lever_x lever_y lever_z [gnss_lever_x gnss_lever_y gnss_lever_z]
-  2. 旧格式 (KF-GINS): 经纬高坐标，51列（含std列）
+  2. 旧格式: 经纬高坐标，51列（含std列）
 """
 
 import argparse
@@ -160,7 +160,7 @@ def detect_format(filepath):
 def load_data(filepath):
     """加载导航结果数据，自动适配新旧格式"""
     fmt = detect_format(filepath)
-    print(f"检测到文件格式: {'ESKF融合结果 (ECEF 28/31列)' if fmt == 'new' else 'KF-GINS旧格式 (LLA 51列)'}")
+    print(f"检测到文件格式: {'融合结果 (ECEF 28/31列)' if fmt == 'new' else '旧格式 (LLA 51列)'}")
 
     if fmt == 'new':
         return _load_new_format(filepath)
@@ -213,7 +213,7 @@ def _load_new_format(filepath):
 
 
 def _load_old_format(filepath):
-    """加载旧格式 KF-GINS 文件"""
+    """加载旧格式导航结果文件。"""
     with open(filepath, 'r') as f:
         header_line = f.readline().strip()
         columns = header_line[1:].split() if header_line.startswith('#') else None

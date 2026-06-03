@@ -1,0 +1,3 @@
+method,overall_rmse_3d_m,mean_outage_rmse_3d_m,max_outage_rmse_3d_m,final_error_3d_m,nhc_accept_ratio,odo_accept_ratio
+ESKF,908.583,560.468,2932.327,26.436,0.855,0.377
+InEKF,10.836,9.819,23.426,3.785,1.0,1.0
